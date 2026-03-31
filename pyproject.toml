@@ -1,0 +1,21 @@
+[project]
+name = "inference-projects"
+version = "0.1.0"
+description = "Budget-capped RL + FSDP + Distillation showcase pipeline"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+inference-pipeline = "inference_projects.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "-q"

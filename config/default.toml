@@ -1,0 +1,43 @@
+[project]
+name = "RL + FSDP + Distillation"
+seed = 42
+
+[budget]
+target_cap_usd = 25.0
+hard_cap_usd = 30.0
+
+[stage_budgets_usd]
+rl = 12.0
+fsdp = 8.0
+distill = 6.0
+eval = 3.0
+
+[token_rates_per_million]
+prefill = 0.13
+sample = 0.40
+train = 0.40
+
+[token_caps]
+rl_prefill = 3000000
+rl_sample = 12000000
+rl_train = 8000000
+fsdp_prefill = 2000000
+fsdp_sample = 4000000
+fsdp_train = 9000000
+distill_prefill = 2000000
+distill_sample = 8000000
+distill_train = 4000000
+eval_prefill = 1000000
+eval_sample = 3000000
+eval_train = 0
+
+[models]
+teacher = "Llama-3.1-8B"
+student = "Llama-3.2-1B"
+baseline = "Llama-3.2-1B-base"
+
+[runtime]
+default_mode = "mock"
+projection_warning_min_usd = 20.0
+projection_warning_max_usd = 30.0
+real_required_env = ["TINKER_API_KEY", "TINKER_BASE_URL", "AWS_PROFILE", "AWS_DEFAULT_REGION"]
