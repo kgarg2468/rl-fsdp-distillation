@@ -43,3 +43,14 @@ projection_warning_max_usd = 30.0
 real_required_env = ["TINKER_API_KEY", "TINKER_BASE_URL"]
 real_poll_interval_seconds = 15
 real_poll_timeout_seconds = 3600
+
+[evaluation]
+prompt_file = "src/inference_projects/fixtures/real_eval_prompts_150.jsonl"
+prompt_limit = 150
+
+[campaign]
+seeds = [17, 29, 43]
+min_runs = 2
+max_runs = 3
+bootstrap_reps = 5000
+early_stop_threshold = 0.03

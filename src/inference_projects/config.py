@@ -27,6 +27,8 @@ class ProjectConfig:
     token_caps: dict[str, TokenUsage]
     budget: BudgetConfig
     runtime: "RuntimeConfig"
+    evaluation: "EvaluationConfig"
+    campaign: "CampaignConfig"
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,21 @@ class RuntimeConfig:
     real_required_env: tuple[str, ...]
     real_poll_interval_seconds: int
     real_poll_timeout_seconds: int
+
+
+@dataclass(frozen=True)
+class EvaluationConfig:
+    prompt_file: Path
+    prompt_limit: int
+
+
+@dataclass(frozen=True)
+class CampaignConfig:
+    seeds: tuple[int, ...]
+    min_runs: int
+    max_runs: int
+    bootstrap_reps: int
+    early_stop_threshold: float
 
 
 def _token_caps_by_stage(raw: dict[str, int]) -> dict[str, TokenUsage]:
@@ -81,8 +98,38 @@ def _validate_runtime(runtime: RuntimeConfig) -> None:
         raise ValueError("runtime.real_poll_timeout_seconds must be > 0")
 
 
+def _validate_evaluation(evaluation: EvaluationConfig) -> None:
+    if evaluation.prompt_limit <= 0:
+        raise ValueError("evaluation.prompt_limit must be > 0")
+
+
+def _validate_campaign(campaign: CampaignConfig) -> None:
+    if not campaign.seeds:
+        raise ValueError("campaign.seeds must not be empty")
+    if campaign.min_runs <= 0:
+        raise ValueError("campaign.min_runs must be > 0")
+    if campaign.max_runs <= 0:
+        raise ValueError("campaign.max_runs must be > 0")
+    if campaign.min_runs > campaign.max_runs:
+        raise ValueError("campaign.min_runs cannot be greater than campaign.max_runs")
+    if campaign.max_runs > len(campaign.seeds):
+        raise ValueError("campaign.max_runs cannot exceed number of campaign.seeds")
+    if campaign.bootstrap_reps <= 0:
+        raise ValueError("campaign.bootstrap_reps must be > 0")
+    if campaign.early_stop_threshold < 0:
+        raise ValueError("campaign.early_stop_threshold must be >= 0")
+
+
+def _resolve_path(config_path: Path, raw_path: str | Path) -> Path:
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = (config_path.parent / path).resolve()
+    return path
+
+
 def load_config(path: Path | str = Path("config/default.toml")) -> ProjectConfig:
-    data = tomllib.loads(Path(path).read_text())
+    config_path = Path(path)
+    data = tomllib.loads(config_path.read_text())
     project = data["project"]
     budget_raw = data["budget"]
     models = data["models"]
@@ -110,6 +157,22 @@ def load_config(path: Path | str = Path("config/default.toml")) -> ProjectConfig
         real_poll_timeout_seconds=int(runtime_raw.get("real_poll_timeout_seconds", 3600)),
     )
     _validate_runtime(runtime)
+    default_prompt_file = Path(__file__).resolve().parent / "fixtures" / "real_eval_prompts_150.jsonl"
+    evaluation_raw = data.get("evaluation", {})
+    evaluation = EvaluationConfig(
+        prompt_file=_resolve_path(config_path, str(evaluation_raw.get("prompt_file", default_prompt_file))),
+        prompt_limit=int(evaluation_raw.get("prompt_limit", 150)),
+    )
+    _validate_evaluation(evaluation)
+    campaign_raw = data.get("campaign", {})
+    campaign = CampaignConfig(
+        seeds=tuple(int(seed) for seed in campaign_raw.get("seeds", [17, 29, 43])),
+        min_runs=int(campaign_raw.get("min_runs", 2)),
+        max_runs=int(campaign_raw.get("max_runs", 3)),
+        bootstrap_reps=int(campaign_raw.get("bootstrap_reps", 5000)),
+        early_stop_threshold=float(campaign_raw.get("early_stop_threshold", 0.03)),
+    )
+    _validate_campaign(campaign)
 
     return ProjectConfig(
         name=str(project["name"]),
@@ -121,4 +184,6 @@ def load_config(path: Path | str = Path("config/default.toml")) -> ProjectConfig
         token_caps=_token_caps_by_stage(data["token_caps"]),
         budget=budget,
         runtime=runtime,
+        evaluation=evaluation,
+        campaign=campaign,
     )
