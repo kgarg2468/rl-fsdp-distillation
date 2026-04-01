@@ -207,15 +207,27 @@ def format_campaign_report(summary: dict[str, Any]) -> str:
                 f"- Run dir: {run['run_dir']}",
                 f"- Stages completed: {', '.join(run['stages_completed'])}",
                 f"- Actual spend (USD): {run['actual_spend_usd']:.4f}",
-                f"- Baseline mean: {run['metrics']['means']['baseline']}",
-                f"- Teacher mean: {run['metrics']['means']['teacher']}",
-                f"- Student mean: {run['metrics']['means']['student']}",
-                f"- Student - Baseline mean: {run['metrics']['means']['student_minus_baseline']}",
-                (
-                    "- Student - Baseline 95% CI: "
-                    f"{run['metrics']['ci95']['student_minus_baseline'][0]} .. "
-                    f"{run['metrics']['ci95']['student_minus_baseline'][1]}"
-                ),
+            ]
+        )
+        metrics = run.get("metrics")
+        if isinstance(metrics, dict):
+            lines.extend(
+                [
+                    f"- Baseline mean: {metrics['means']['baseline']}",
+                    f"- Teacher mean: {metrics['means']['teacher']}",
+                    f"- Student mean: {metrics['means']['student']}",
+                    f"- Student - Baseline mean: {metrics['means']['student_minus_baseline']}",
+                    (
+                        "- Student - Baseline 95% CI: "
+                        f"{metrics['ci95']['student_minus_baseline'][0]} .. "
+                        f"{metrics['ci95']['student_minus_baseline'][1]}"
+                    ),
+                ]
+            )
+        else:
+            lines.append("- Metrics: not available (run stopped before eval).")
+        lines.extend(
+            [
                 f"- Eval report: {run['artifacts']['eval_report']}",
                 f"- Run audit report: {run['artifacts']['run_audit_report']}",
                 f"- Eval rows: {run['artifacts']['eval_rows']}",
@@ -228,14 +240,21 @@ def format_campaign_report(summary: dict[str, Any]) -> str:
             "",
             "## Aggregate",
             f"- Runs completed: {summary['aggregate']['across_runs']['runs']}",
-            f"- Student mean across runs: {summary['aggregate']['across_runs']['mean']['student']}",
-            f"- Student std across runs: {summary['aggregate']['across_runs']['std']['student']}",
-            f"- Student-Baseline mean across runs: {summary['aggregate']['across_runs']['mean']['student_minus_baseline']}",
             (
-                "- Pooled Student-Baseline 95% CI: "
-                f"{summary['aggregate']['pooled']['ci95']['student_minus_baseline'][0]} .. "
-                f"{summary['aggregate']['pooled']['ci95']['student_minus_baseline'][1]}"
+                "- Student mean across runs: "
+                f"{summary['aggregate']['across_runs'].get('mean', {}).get('student', 'n/a')}"
             ),
+            (
+                "- Student std across runs: "
+                f"{summary['aggregate']['across_runs'].get('std', {}).get('student', 'n/a')}"
+            ),
+            (
+                "- Student-Baseline mean across runs: "
+                f"{summary['aggregate']['across_runs'].get('mean', {}).get('student_minus_baseline', 'n/a')}"
+            ),
+            "- Pooled Student-Baseline 95% CI: "
+            f"{summary['aggregate']['pooled'].get('ci95', {}).get('student_minus_baseline', ['n/a', 'n/a'])[0]} .. "
+            f"{summary['aggregate']['pooled'].get('ci95', {}).get('student_minus_baseline', ['n/a', 'n/a'])[1]}",
             "",
             "## Early Stop Decision",
             f"- Triggered: {summary['early_stop']['triggered']}",

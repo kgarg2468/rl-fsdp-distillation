@@ -122,9 +122,12 @@ def _validate_campaign(campaign: CampaignConfig) -> None:
 
 def _resolve_path(config_path: Path, raw_path: str | Path) -> Path:
     path = Path(raw_path)
-    if not path.is_absolute():
-        path = (config_path.parent / path).resolve()
-    return path
+    if path.is_absolute():
+        return path
+    relative_to_config = (config_path.parent / path).resolve()
+    if relative_to_config.exists():
+        return relative_to_config
+    return path.resolve()
 
 
 def load_config(path: Path | str = Path("config/default.toml")) -> ProjectConfig:
