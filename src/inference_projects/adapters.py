@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from inference_projects.config import ProjectConfig
+from inference_projects.tinker_runtime import REAL_USAGE_KEY, run_real_distill, run_real_eval, run_real_fsdp, run_real_rl
 
 
 class RLStageAdapter(Protocol):
@@ -177,9 +178,11 @@ class RealRLAdapter:
     mode: str = "real"
 
     def run(self, *, cfg: ProjectConfig, actual_cost_usd: float) -> dict[str, object]:
-        raise NotImplementedError(
-            "Real RL adapter scaffolded. Configure Tinker integration and replace this method implementation."
-        )
+        _ = actual_cost_usd
+        result = run_real_rl(cfg=cfg)
+        payload = dict(result["payload"])
+        payload[REAL_USAGE_KEY] = dict(result["usage"])
+        return payload
 
 
 @dataclass(frozen=True)
@@ -193,9 +196,11 @@ class RealFSDPAdapter:
         teacher_payload: dict[str, object],
         actual_cost_usd: float,
     ) -> dict[str, object]:
-        raise NotImplementedError(
-            "Real FSDP adapter scaffolded. Configure Axolotl launch integration and replace this implementation."
-        )
+        _ = actual_cost_usd
+        result = run_real_fsdp(cfg=cfg, teacher_payload=teacher_payload)
+        payload = dict(result["payload"])
+        payload[REAL_USAGE_KEY] = dict(result["usage"])
+        return payload
 
 
 @dataclass(frozen=True)
@@ -209,9 +214,11 @@ class RealDistillAdapter:
         teacher_payload: dict[str, object],
         actual_cost_usd: float,
     ) -> dict[str, object]:
-        raise NotImplementedError(
-            "Real distillation adapter scaffolded. Configure teacher->student data generation and training integration."
-        )
+        _ = actual_cost_usd
+        result = run_real_distill(cfg=cfg, teacher_payload=teacher_payload)
+        payload = dict(result["payload"])
+        payload[REAL_USAGE_KEY] = dict(result["usage"])
+        return payload
 
 
 @dataclass(frozen=True)
@@ -226,9 +233,11 @@ class RealEvalAdapter:
         student_payload: dict[str, object],
         actual_cost_usd: float,
     ) -> dict[str, object]:
-        raise NotImplementedError(
-            "Real eval adapter scaffolded. Configure benchmark + LLM-judge integrations and replace this implementation."
-        )
+        _ = actual_cost_usd
+        result = run_real_eval(cfg=cfg, teacher_payload=teacher_payload, student_payload=student_payload)
+        payload = dict(result["payload"])
+        payload[REAL_USAGE_KEY] = dict(result["usage"])
+        return payload
 
 
 def select_stage_adapters(mode: str) -> StageAdapters:
