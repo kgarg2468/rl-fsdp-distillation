@@ -21,3 +21,19 @@ def test_missing_stage_budget_rejected(tmp_path: Path):
     cfg.write_text(Path("config/default.toml").read_text().replace("eval = 3.0\n", ""))
     with pytest.raises(ValueError):
         load_config(cfg)
+
+
+def test_invalid_real_polling_values_rejected(tmp_path: Path):
+    cfg = tmp_path / "bad_runtime.toml"
+    text = Path("config/default.toml").read_text()
+    text = text.replace("real_poll_interval_seconds = 15", "real_poll_interval_seconds = 0")
+    cfg.write_text(text)
+    with pytest.raises(ValueError):
+        load_config(cfg)
+
+
+def test_real_canary_config_loads_successfully():
+    cfg = load_config("config/real_canary.toml")
+    assert cfg.runtime.real_required_env == ("TINKER_API_KEY", "TINKER_BASE_URL")
+    assert cfg.runtime.real_poll_interval_seconds == 15
+    assert cfg.runtime.real_poll_timeout_seconds == 3600
