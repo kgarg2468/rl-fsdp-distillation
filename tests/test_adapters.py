@@ -1,5 +1,3 @@
-import os
-
 import pytest
 
 from inference_projects import adapters
