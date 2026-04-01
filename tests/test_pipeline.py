@@ -1,8 +1,10 @@
 from pathlib import Path
 
 import pytest
+from inference_projects.adapters import StageAdapters
 from inference_projects.preflight import SetupError
 from inference_projects.pipeline import run_pipeline_command
+from inference_projects.tinker_runtime import REAL_USAGE_KEY
 
 
 def test_rl_stage_creates_teacher_checkpoint(tmp_path: Path):
@@ -57,3 +59,111 @@ def test_dryrun_does_not_create_artifacts(tmp_path: Path):
     assert result is not None
     assert "projected_total_usd" in result
     assert not (state_dir / "artifacts").exists()
+
+
+def test_real_mode_uses_adapter_usage_for_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("TINKER_API_KEY", "dummy-key")
+    monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
+
+    class FakeRealRL:
+        mode = "real"
+
+        def run(self, *, cfg, actual_cost_usd):
+            _ = (cfg, actual_cost_usd)
+            return {
+                "model": "meta-llama/Llama-3.1-8B",
+                "stage": "rl",
+                "quality_score": 0.75,
+                "stability_score": 0.92,
+                REAL_USAGE_KEY: {
+                    "prefill_tokens": 321,
+                    "sample_tokens": 123,
+                    "train_tokens": 0,
+                    "cost_usd": 0.0456,
+                    "provider_raw": {"mocked": True},
+                    "run_id": "run-abc",
+                },
+            }
+
+    class NoopFSDP:
+        mode = "real"
+
+        def run(self, *, cfg, teacher_payload, actual_cost_usd):
+            raise AssertionError("unexpected call")
+
+    class NoopDistill:
+        mode = "real"
+
+        def run(self, *, cfg, teacher_payload, actual_cost_usd):
+            raise AssertionError("unexpected call")
+
+    class NoopEval:
+        mode = "real"
+
+        def run(self, *, cfg, teacher_payload, student_payload, actual_cost_usd):
+            raise AssertionError("unexpected call")
+
+    monkeypatch.setattr(
+        "inference_projects.pipeline.select_stage_adapters",
+        lambda mode: StageAdapters(
+            rl=FakeRealRL(),
+            fsdp=NoopFSDP(),
+            distill=NoopDistill(),
+            eval=NoopEval(),
+        ),
+    )
+    run_pipeline_command("rl", mode="real", state_dir=state_dir)
+
+    ledger = (state_dir / "artifacts/ledger.json").read_text()
+    assert "\"actual_cost_usd\": 0.0456" in ledger
+    assert "\"prefill\": 321" in ledger
+    assert "\"sample\": 123" in ledger
+
+
+def test_real_mode_missing_usage_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("TINKER_API_KEY", "dummy-key")
+    monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
+
+    class BadRealRL:
+        mode = "real"
+
+        def run(self, *, cfg, actual_cost_usd):
+            _ = (cfg, actual_cost_usd)
+            return {
+                "model": "meta-llama/Llama-3.1-8B",
+                "stage": "rl",
+                "quality_score": 0.75,
+                "stability_score": 0.92,
+            }
+
+    class NoopFSDP:
+        mode = "real"
+
+        def run(self, *, cfg, teacher_payload, actual_cost_usd):
+            raise AssertionError("unexpected call")
+
+    class NoopDistill:
+        mode = "real"
+
+        def run(self, *, cfg, teacher_payload, actual_cost_usd):
+            raise AssertionError("unexpected call")
+
+    class NoopEval:
+        mode = "real"
+
+        def run(self, *, cfg, teacher_payload, student_payload, actual_cost_usd):
+            raise AssertionError("unexpected call")
+
+    monkeypatch.setattr(
+        "inference_projects.pipeline.select_stage_adapters",
+        lambda mode: StageAdapters(
+            rl=BadRealRL(),
+            fsdp=NoopFSDP(),
+            distill=NoopDistill(),
+            eval=NoopEval(),
+        ),
+    )
+    with pytest.raises(RuntimeError):
+        run_pipeline_command("rl", mode="real", state_dir=state_dir)
