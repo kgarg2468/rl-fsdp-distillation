@@ -22,6 +22,7 @@ from inference_projects.schemas import (
     validate_student_checkpoint,
     validate_teacher_checkpoint,
 )
+from inference_projects.tinker_runtime import REAL_USAGE_KEY
 
 SUPPORTED_COMMANDS = {"rl", "fsdp", "distill", "eval", "report", "all", "smoke", "preflight", "dryrun"}
 
@@ -127,7 +128,7 @@ def _dryrun_summary(cfg: ProjectConfig, mode: str) -> dict[str, object]:
     }
 
 
-def _projected_and_actual(stage: str, cfg: ProjectConfig) -> tuple[TokenUsage, float, TokenUsage, float]:
+def _projected_and_actual_mock(stage: str, cfg: ProjectConfig) -> tuple[TokenUsage, float, TokenUsage, float]:
     projected_tokens = budget.stage_token_usage(stage, cfg)
     projected_cost = budget.projected_stage_cost_usd(stage, cfg)
     # Keep actual spend under projection for predictable low-cost demo behavior.
@@ -147,11 +148,59 @@ def _projected_and_actual(stage: str, cfg: ProjectConfig) -> tuple[TokenUsage, f
     return projected_tokens, projected_cost, actual_tokens, actual_cost
 
 
-def _run_budget_checked_stage(stage: str, cfg: ProjectConfig, paths: PipelinePaths, mode: str) -> tuple[Ledger, StageRecord]:
+def _stage_budget_check(stage: str, cfg: ProjectConfig, paths: PipelinePaths) -> tuple[Ledger, TokenUsage, float]:
     ledger = load_ledger(paths.ledger)
-    projected_tokens, projected_cost, actual_tokens, actual_cost = _projected_and_actual(stage, cfg)
+    projected_tokens = budget.stage_token_usage(stage, cfg)
+    projected_cost = budget.projected_stage_cost_usd(stage, cfg)
     budget.ensure_within_stage_budget(stage, projected_cost, cfg)
     budget.ensure_within_hard_cap(current_total=ledger.total_spend_usd, incoming_cost=projected_cost, cfg=cfg)
+    return ledger, projected_tokens, projected_cost
+
+
+def _real_usage_from_payload(payload: dict[str, object], cfg: ProjectConfig) -> tuple[TokenUsage, float]:
+    raw = payload.get(REAL_USAGE_KEY)
+    if not isinstance(raw, dict):
+        raise RuntimeError(f"Real mode adapter payload missing required usage object '{REAL_USAGE_KEY}'")
+
+    required = ("prefill_tokens", "sample_tokens", "train_tokens")
+    for key in required:
+        if key not in raw:
+            raise RuntimeError(f"Real mode usage object missing required field: {key}")
+        if not isinstance(raw[key], int):
+            raise RuntimeError(f"Real mode usage field '{key}' must be int")
+
+    tokens = TokenUsage(
+        prefill=int(raw["prefill_tokens"]),
+        sample=int(raw["sample_tokens"]),
+        train=int(raw["train_tokens"]),
+    )
+    raw_cost = raw.get("cost_usd")
+    if raw_cost is None:
+        rates = cfg.token_rates_per_million
+        actual_cost = cost_usd(
+            tokens,
+            prefill_rate=rates["prefill"],
+            sample_rate=rates["sample"],
+            train_rate=rates["train"],
+        )
+    elif isinstance(raw_cost, (int, float)):
+        actual_cost = round(float(raw_cost), 4)
+    else:
+        raise RuntimeError("Real mode usage field 'cost_usd' must be numeric or null")
+    return tokens, actual_cost
+
+
+def _record_stage(
+    *,
+    stage: str,
+    mode: str,
+    paths: PipelinePaths,
+    ledger: Ledger,
+    projected_tokens: TokenUsage,
+    projected_cost: float,
+    actual_tokens: TokenUsage,
+    actual_cost: float,
+) -> StageRecord:
     record = StageRecord(
         mode=mode,
         stage=stage,
@@ -163,45 +212,115 @@ def _run_budget_checked_stage(stage: str, cfg: ProjectConfig, paths: PipelinePat
     )
     updated = add_record(ledger, record)
     save_ledger(paths.ledger, updated)
-    return updated, record
+    return record
 
 
 def run_rl(cfg: ProjectConfig, paths: PipelinePaths, *, adapter: RLStageAdapter, mode: str) -> None:
-    _, record = _run_budget_checked_stage("rl", cfg, paths, mode)
-    payload = adapter.run(cfg=cfg, actual_cost_usd=record.actual_cost_usd)
+    stage = "rl"
+    ledger, projected_tokens, projected_cost = _stage_budget_check(stage, cfg, paths)
+    _, _, mock_actual_tokens, mock_actual_cost = _projected_and_actual_mock(stage, cfg)
+    payload = adapter.run(cfg=cfg, actual_cost_usd=mock_actual_cost)
+    if mode == "real":
+        actual_tokens, actual_cost = _real_usage_from_payload(payload, cfg)
+    else:
+        actual_tokens, actual_cost = mock_actual_tokens, mock_actual_cost
+    _record_stage(
+        stage=stage,
+        mode=mode,
+        paths=paths,
+        ledger=ledger,
+        projected_tokens=projected_tokens,
+        projected_cost=projected_cost,
+        actual_tokens=actual_tokens,
+        actual_cost=actual_cost,
+    )
+    payload.pop(REAL_USAGE_KEY, None)
     payload.update({"schema_version": SCHEMA_VERSION, "mode": mode})
     validate_teacher_checkpoint(payload)
     _write_json(paths.teacher_ckpt, payload)
 
 
 def run_fsdp(cfg: ProjectConfig, paths: PipelinePaths, *, adapter: FSDPStageAdapter, mode: str) -> None:
-    _, record = _run_budget_checked_stage("fsdp", cfg, paths, mode)
+    stage = "fsdp"
+    ledger, projected_tokens, projected_cost = _stage_budget_check(stage, cfg, paths)
+    _, _, mock_actual_tokens, mock_actual_cost = _projected_and_actual_mock(stage, cfg)
     teacher = _read_json(paths.teacher_ckpt)
-    payload = adapter.run(cfg=cfg, teacher_payload=teacher, actual_cost_usd=record.actual_cost_usd)
+    payload = adapter.run(cfg=cfg, teacher_payload=teacher, actual_cost_usd=mock_actual_cost)
+    if mode == "real":
+        actual_tokens, actual_cost = _real_usage_from_payload(payload, cfg)
+    else:
+        actual_tokens, actual_cost = mock_actual_tokens, mock_actual_cost
+    _record_stage(
+        stage=stage,
+        mode=mode,
+        paths=paths,
+        ledger=ledger,
+        projected_tokens=projected_tokens,
+        projected_cost=projected_cost,
+        actual_tokens=actual_tokens,
+        actual_cost=actual_cost,
+    )
+    payload.pop(REAL_USAGE_KEY, None)
     payload.update({"schema_version": SCHEMA_VERSION, "mode": mode})
     validate_teacher_checkpoint(payload)
     _write_json(paths.teacher_ckpt, payload)
 
 
 def run_distill(cfg: ProjectConfig, paths: PipelinePaths, *, adapter: DistillStageAdapter, mode: str) -> None:
-    _, record = _run_budget_checked_stage("distill", cfg, paths, mode)
+    stage = "distill"
+    ledger, projected_tokens, projected_cost = _stage_budget_check(stage, cfg, paths)
+    _, _, mock_actual_tokens, mock_actual_cost = _projected_and_actual_mock(stage, cfg)
     teacher = _read_json(paths.teacher_ckpt)
-    payload = adapter.run(cfg=cfg, teacher_payload=teacher, actual_cost_usd=record.actual_cost_usd)
+    payload = adapter.run(cfg=cfg, teacher_payload=teacher, actual_cost_usd=mock_actual_cost)
+    if mode == "real":
+        actual_tokens, actual_cost = _real_usage_from_payload(payload, cfg)
+    else:
+        actual_tokens, actual_cost = mock_actual_tokens, mock_actual_cost
+    _record_stage(
+        stage=stage,
+        mode=mode,
+        paths=paths,
+        ledger=ledger,
+        projected_tokens=projected_tokens,
+        projected_cost=projected_cost,
+        actual_tokens=actual_tokens,
+        actual_cost=actual_cost,
+    )
+    payload.pop(REAL_USAGE_KEY, None)
     payload.update({"schema_version": SCHEMA_VERSION, "mode": mode})
     validate_student_checkpoint(payload)
     _write_json(paths.student_ckpt, payload)
 
 
 def run_eval(cfg: ProjectConfig, paths: PipelinePaths, *, adapter: EvalStageAdapter, mode: str) -> None:
-    _, record = _run_budget_checked_stage("eval", cfg, paths, mode)
+    stage = "eval"
+    ledger, projected_tokens, projected_cost = _stage_budget_check(stage, cfg, paths)
+    _, _, mock_actual_tokens, mock_actual_cost = _projected_and_actual_mock(stage, cfg)
     teacher = _read_json(paths.teacher_ckpt)
     student = _read_json(paths.student_ckpt)
     payload = adapter.run(
         cfg=cfg,
         teacher_payload=teacher,
         student_payload=student,
-        actual_cost_usd=record.actual_cost_usd,
+        actual_cost_usd=mock_actual_cost,
     )
+    if mode == "real":
+        actual_tokens, actual_cost = _real_usage_from_payload(payload, cfg)
+    else:
+        actual_tokens, actual_cost = mock_actual_tokens, mock_actual_cost
+    _record_stage(
+        stage=stage,
+        mode=mode,
+        paths=paths,
+        ledger=ledger,
+        projected_tokens=projected_tokens,
+        projected_cost=projected_cost,
+        actual_tokens=actual_tokens,
+        actual_cost=actual_cost,
+    )
+    payload.pop(REAL_USAGE_KEY, None)
+    if isinstance(payload.get("cost"), dict):
+        payload["cost"]["eval_stage_cost_usd"] = round(actual_cost, 4)
     payload.update({"schema_version": SCHEMA_VERSION, "mode": mode})
     validate_eval_metrics(payload)
     _write_json(paths.eval_metrics, payload)
