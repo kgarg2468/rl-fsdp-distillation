@@ -5,5 +5,7 @@ __pycache__/
 *.egg-info/
 artifacts/*
 !artifacts/.gitkeep
+runs/*
+!runs/.gitkeep
 
 documentation/
