@@ -122,11 +122,17 @@ Full pipeline:
 make all MODE=mock STATE_DIR=/tmp/inference-demo
 ```
 
+Campaign pipeline (multi-seed with global cap):
+```bash
+make campaign MODE=real CONFIG=config/default.toml STATE_DIR=/tmp/inference-campaign PRIOR_LEDGER=/tmp/prior-ledger.json PROJECT_HARD_CAP_USD=35.0
+```
+
 CLI equivalents (public interface):
 ```bash
 python -m inference_projects.cli preflight --mode mock --config config/default.toml --state-dir /tmp/inference-demo
 python -m inference_projects.cli dryrun --mode mock --config config/default.toml --state-dir /tmp/inference-demo
 python -m inference_projects.cli all --mode mock --config config/default.toml --state-dir /tmp/inference-demo
+python -m inference_projects.cli campaign --mode real --config config/default.toml --state-dir /tmp/inference-campaign --prior-ledger /tmp/prior-ledger.json --project-hard-cap-usd 35.0
 ```
 
 Supported CLI commands:
@@ -139,6 +145,7 @@ Supported CLI commands:
 - `smoke`
 - `preflight`
 - `dryrun`
+- `campaign`
 
 ## Artifacts and Schemas
 Artifact contract under `artifacts/`:
@@ -162,6 +169,8 @@ Config contract (`config/default.toml`):
 - `token_caps`: stage token caps
 - `models`: teacher/student/baseline names
 - `runtime`: default mode, warning band, required env vars for real mode, and real-mode polling settings
+- `evaluation`: prompt fixture path + prompt limit for real eval
+- `campaign`: seed list, min/max runs, bootstrap reps, and early-stop threshold
 
 ## Real-Mode Runbook
 Required environment variables for `--mode real`:
@@ -222,6 +231,19 @@ python -m inference_projects.cli distill --mode real --config config/default.tom
 python -m inference_projects.cli eval --mode real --config config/default.toml --state-dir "$STATE_DIR"
 python -m inference_projects.cli report --mode real --config config/default.toml --state-dir "$STATE_DIR"
 ```
+
+Campaign orchestration (2-3 seeds with early stop + global cap):
+```bash
+set -a && source .env && set +a
+STATE_DIR="$(mktemp -d /tmp/inference-campaign.XXXXXX)"
+python -m inference_projects.cli campaign --mode real --config config/default.toml --state-dir "$STATE_DIR" --prior-ledger /path/to/previous/artifacts/ledger.json --project-hard-cap-usd 35.0
+```
+
+Campaign outputs:
+- `campaign/frozen_prompts.jsonl`
+- `campaign/campaign_summary.json`
+- `campaign/campaign_report.md`
+- `campaign/runs/seed-<seed>/...` (standard per-run artifacts)
 
 ## Limitations and Non-Goals
 - Not a production training platform in current form.
