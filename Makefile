@@ -2,8 +2,10 @@ PYTHON ?= python3
 MODE ?= mock
 CONFIG ?= config/default.toml
 STATE_DIR ?= .
+PRIOR_LEDGER ?=
+PROJECT_HARD_CAP_USD ?= 35.0
 
-.PHONY: install test rl fsdp distill eval report all smoke preflight dryrun verify
+.PHONY: install test rl fsdp distill eval report all smoke preflight dryrun campaign verify
 
 install:
 	$(PYTHON) -m pip install -e .[dev]
@@ -37,6 +39,13 @@ preflight:
 
 dryrun:
 	$(PYTHON) -m inference_projects.cli dryrun --mode $(MODE) --config $(CONFIG) --state-dir $(STATE_DIR)
+
+campaign:
+	@if [ -n "$(PRIOR_LEDGER)" ]; then \
+		$(PYTHON) -m inference_projects.cli campaign --mode $(MODE) --config $(CONFIG) --state-dir $(STATE_DIR) --prior-ledger $(PRIOR_LEDGER) --project-hard-cap-usd $(PROJECT_HARD_CAP_USD); \
+	else \
+		$(PYTHON) -m inference_projects.cli campaign --mode $(MODE) --config $(CONFIG) --state-dir $(STATE_DIR) --project-hard-cap-usd $(PROJECT_HARD_CAP_USD); \
+	fi
 
 verify:
 	./scripts/verify_local.sh
