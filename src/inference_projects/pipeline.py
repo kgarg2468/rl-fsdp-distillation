@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 import time
+from typing import Any
 
 from inference_projects import audit
 from inference_projects import budget
+from inference_projects import campaign as campaign_utils
 from inference_projects.adapters import (
     DistillStageAdapter,
     EvalStageAdapter,
@@ -28,7 +30,7 @@ from inference_projects.schemas import (
 from inference_projects.tinker_runtime import REAL_USAGE_KEY
 from inference_projects.tinker_runtime import EVAL_ROWS_KEY, PROMPT_TRACES_KEY
 
-SUPPORTED_COMMANDS = {"rl", "fsdp", "distill", "eval", "report", "all", "smoke", "preflight", "dryrun"}
+SUPPORTED_COMMANDS = {"rl", "fsdp", "distill", "eval", "report", "all", "smoke", "preflight", "dryrun", "campaign"}
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,8 @@ def run_pipeline_command(
     mode: str | None = None,
     config_path: Path | str = Path("config/default.toml"),
     state_dir: Path | str = Path("."),
+    prior_ledger: Path | str | None = None,
+    project_hard_cap_usd: float = 35.0,
 ) -> dict[str, object] | None:
     if command not in SUPPORTED_COMMANDS:
         raise ValueError(f"Unknown command: {command}")
@@ -99,6 +103,15 @@ def run_pipeline_command(
 
     if command == "dryrun":
         return _dryrun_summary(cfg, resolved_mode)
+
+    if command == "campaign":
+        return run_campaign(
+            cfg=cfg,
+            mode=resolved_mode,
+            state_dir=paths.root,
+            prior_ledger=Path(prior_ledger) if prior_ledger else None,
+            project_hard_cap_usd=float(project_hard_cap_usd),
+        )
 
     preflight_result = ensure_preflight_ready(mode=resolved_mode, cfg=cfg, state_dir=paths.root)
     adapters = select_stage_adapters(resolved_mode)
