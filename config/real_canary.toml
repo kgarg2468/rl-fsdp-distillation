@@ -1,0 +1,45 @@
+[project]
+name = "RL + FSDP + Distillation (Real Canary)"
+seed = 42
+
+[budget]
+target_cap_usd = 8.0
+hard_cap_usd = 12.0
+
+[stage_budgets_usd]
+rl = 4.0
+fsdp = 3.0
+distill = 3.0
+eval = 2.0
+
+[token_rates_per_million]
+prefill = 0.13
+sample = 0.40
+train = 0.40
+
+[token_caps]
+rl_prefill = 500000
+rl_sample = 1500000
+rl_train = 500000
+fsdp_prefill = 400000
+fsdp_sample = 1000000
+fsdp_train = 500000
+distill_prefill = 400000
+distill_sample = 1200000
+distill_train = 300000
+eval_prefill = 250000
+eval_sample = 800000
+eval_train = 0
+
+[models]
+teacher = "meta-llama/Llama-3.1-8B"
+student = "meta-llama/Llama-3.2-1B"
+baseline = "meta-llama/Llama-3.2-1B"
+
+[runtime]
+default_mode = "mock"
+projection_warning_min_usd = 5.0
+projection_warning_max_usd = 12.0
+real_required_env = ["TINKER_API_KEY", "TINKER_BASE_URL"]
+real_poll_interval_seconds = 15
+real_poll_timeout_seconds = 3600
