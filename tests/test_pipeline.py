@@ -44,7 +44,7 @@ def test_low_hard_cap_aborts_run(tmp_path: Path):
 
 def test_real_mode_without_credentials_fails_fast(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     state_dir = tmp_path / "state"
-    for key in ("TINKER_API_KEY", "TINKER_BASE_URL", "AWS_PROFILE", "AWS_DEFAULT_REGION"):
+    for key in ("TINKER_API_KEY", "TINKER_BASE_URL"):
         monkeypatch.delenv(key, raising=False)
     with pytest.raises(SetupError) as exc:
         run_pipeline_command("rl", mode="real", state_dir=state_dir)
