@@ -561,7 +561,7 @@ def run_real_eval(
     student_payload: dict[str, object],
 ) -> dict[str, object]:
     service = build_service_client()
-    prompts = load_canary_prompts(limit=8)
+    prompts = load_canary_prompts(limit=cfg.evaluation.prompt_limit, fixture_path=cfg.evaluation.prompt_file)
     prompt_texts = [row.prompt for row in prompts]
     references = [row.reference for row in prompts]
 
