@@ -104,6 +104,79 @@ def validate_ledger_payload(payload: dict[str, Any]) -> None:
         )
 
 
+def validate_run_manifest_payload(payload: dict[str, Any]) -> None:
+    _require_keys(
+        payload,
+        {
+            "schema_version": str,
+            "mode": str,
+            "project_name": str,
+            "started_at": str,
+            "updated_at": str,
+            "stages_expected": list,
+            "stages_completed": list,
+            "target_cap_usd": (int, float),
+            "hard_cap_usd": (int, float),
+            "state_dir": str,
+        },
+    )
+
+
+def validate_stage_audit_payload(payload: dict[str, Any]) -> None:
+    _require_keys(
+        payload,
+        {
+            "schema_version": str,
+            "mode": str,
+            "stage": str,
+            "status": str,
+            "started_at": str,
+            "finished_at": str,
+            "duration_seconds": (int, float),
+            "projected_cost_usd": (int, float),
+            "actual_cost_usd": (int, float),
+            "stage_cap_usd": (int, float),
+            "cumulative_total_before_usd": (int, float),
+            "cumulative_total_after_usd": (int, float),
+            "projected_tokens": dict,
+            "actual_tokens": dict,
+            "usage": dict,
+        },
+    )
+    _require_keys(payload["projected_tokens"], {"prefill": int, "sample": int, "train": int})
+    _require_keys(payload["actual_tokens"], {"prefill": int, "sample": int, "train": int})
+    _require_keys(
+        payload["usage"],
+        {
+            "prefill_tokens": int,
+            "sample_tokens": int,
+            "train_tokens": int,
+            "cost_usd": (int, float, type(None)),
+            "provider_raw": dict,
+            "run_id": str,
+        },
+    )
+
+
+def validate_audit_eval_row(payload: dict[str, Any]) -> None:
+    _require_keys(
+        payload,
+        {
+            "row_id": str,
+            "prompt": str,
+            "reference": str,
+            "baseline_output": str,
+            "teacher_output": str,
+            "student_output": str,
+            "baseline_overlap": (int, float),
+            "teacher_overlap": (int, float),
+            "student_overlap": (int, float),
+            "student_vs_baseline_win": (int, float),
+            "student_vs_teacher_win": (int, float),
+        },
+    )
+
+
 def _nested(payload: dict[str, Any], key: str, nested_key: str) -> dict[str, Any]:
     outer = payload.get(key)
     if not isinstance(outer, dict):
