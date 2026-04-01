@@ -43,6 +43,8 @@ def build_service_client() -> ServiceClient:
 
 
 def load_canary_prompts(*, limit: int | None = None, fixture_path: Path = CANARY_FIXTURE_PATH) -> list[PromptRow]:
+    if not fixture_path.exists():
+        raise FileNotFoundError(f"Canary fixture missing: {fixture_path}")
     rows: list[PromptRow] = []
     for line in fixture_path.read_text().splitlines():
         if not line.strip():
@@ -56,7 +58,9 @@ def load_canary_prompts(*, limit: int | None = None, fixture_path: Path = CANARY
             )
         )
     if limit is not None:
-        return rows[:limit]
+        rows = rows[:limit]
+    if not rows:
+        raise RuntimeError(f"Canary fixture has no prompts: {fixture_path}")
     return rows
 
 
