@@ -188,6 +188,11 @@ def test_campaign_stops_after_two_runs_when_variance_low(tmp_path: Path, monkeyp
     assert summary["executed_seeds"] == [17, 29]
     assert len(summary["runs"]) == 2
     assert all(run["metrics"]["rows"] == 150 for run in summary["runs"])
+    summary_file = Path(summary["artifacts"]["campaign_summary"])
+    report_file = Path(summary["artifacts"]["campaign_report"])
+    assert summary_file.exists()
+    assert report_file.exists()
+    assert "artifacts" in json.loads(summary_file.read_text())
 
     first_rows = [json.loads(line) for line in Path(summary["runs"][0]["artifacts"]["eval_rows"]).read_text().splitlines() if line]
     second_rows = [json.loads(line) for line in Path(summary["runs"][1]["artifacts"]["eval_rows"]).read_text().splitlines() if line]

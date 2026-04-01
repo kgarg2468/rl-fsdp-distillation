@@ -383,15 +383,15 @@ def run_campaign(
         "stop_reason": stop_reason,
     }
 
-    summary_path = campaign_dir / "campaign_summary.json"
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
-    summary_path.write_text(json.dumps(summary, indent=2) + "\n")
     report_path = campaign_dir / "campaign_report.md"
-    report_path.write_text(campaign_utils.format_campaign_report(summary))
+    summary_path = campaign_dir / "campaign_summary.json"
     summary["artifacts"] = {
         "campaign_summary": str(summary_path),
         "campaign_report": str(report_path),
     }
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+    report_path.write_text(campaign_utils.format_campaign_report(summary))
     return summary
 
 
