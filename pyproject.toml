@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Budget-capped RL + FSDP + Distillation showcase pipeline"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["tinker==0.16.1"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
