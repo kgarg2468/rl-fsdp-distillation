@@ -15,3 +15,24 @@ def test_cli_supports_preflight_command():
     args = parser.parse_args(["preflight", "--mode", "real"])
     assert args.command == "preflight"
     assert args.mode == "real"
+
+
+def test_cli_parses_campaign_flags():
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "campaign",
+            "--mode",
+            "real",
+            "--prior-ledger",
+            "/tmp/prior-ledger.json",
+            "--project-hard-cap-usd",
+            "35.0",
+            "--state-dir",
+            "/tmp/state",
+        ]
+    )
+    assert args.command == "campaign"
+    assert args.mode == "real"
+    assert args.prior_ledger == "/tmp/prior-ledger.json"
+    assert args.project_hard_cap_usd == 35.0
