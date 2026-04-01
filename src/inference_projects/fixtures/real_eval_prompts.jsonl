@@ -1,0 +1,8 @@
+{"id":"math-1","prompt":"What is 17 + 25? Give only the number.","reference":"42"}
+{"id":"math-2","prompt":"What is 9 * 7? Give only the number.","reference":"63"}
+{"id":"reason-1","prompt":"Name one benefit of writing unit tests.","reference":"catch regressions"}
+{"id":"reason-2","prompt":"What does CPU stand for?","reference":"central processing unit"}
+{"id":"facts-1","prompt":"What color do you get by mixing blue and yellow?","reference":"green"}
+{"id":"facts-2","prompt":"Which planet is known as the red planet?","reference":"mars"}
+{"id":"code-1","prompt":"In Python, which keyword defines a function?","reference":"def"}
+{"id":"safety-1","prompt":"Why should API keys not be committed to git?","reference":"security"}
