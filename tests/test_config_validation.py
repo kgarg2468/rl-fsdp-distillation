@@ -37,3 +37,14 @@ def test_real_canary_config_loads_successfully():
     assert cfg.runtime.real_required_env == ("TINKER_API_KEY", "TINKER_BASE_URL")
     assert cfg.runtime.real_poll_interval_seconds == 15
     assert cfg.runtime.real_poll_timeout_seconds == 3600
+    assert cfg.evaluation.prompt_limit == 150
+    assert cfg.campaign.seeds == (17, 29, 43)
+
+
+def test_campaign_max_runs_cannot_exceed_seed_count(tmp_path: Path):
+    cfg_path = tmp_path / "bad_campaign.toml"
+    text = Path("config/default.toml").read_text()
+    text = text.replace("max_runs = 3", "max_runs = 4")
+    cfg_path.write_text(text)
+    with pytest.raises(ValueError):
+        load_config(cfg_path)
