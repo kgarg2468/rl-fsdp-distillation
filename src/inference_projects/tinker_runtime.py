@@ -38,6 +38,7 @@ class SamplingBatch:
 class TrainingCheckpoint:
     run_id: str
     checkpoint_path: str
+    sampler_checkpoint_path: str
 
 
 def build_service_client() -> ServiceClient:
@@ -107,17 +108,19 @@ def _save_new_checkpoint(
     stage: str,
     poll_interval_seconds: int,
     timeout_seconds: int,
+    wait_for_checkpoint: bool = True,
 ) -> str:
     checkpoint_name = f"inference-projects-{stage}-{int(time.time())}"
     save_result = save_state_callable(checkpoint_name).result()
     checkpoint_path = str(save_result.path)
-    _wait_for_checkpoint(
-        service=service,
-        run_id=run_id,
-        checkpoint_path=checkpoint_path,
-        poll_interval_seconds=poll_interval_seconds,
-        timeout_seconds=timeout_seconds,
-    )
+    if wait_for_checkpoint:
+        _wait_for_checkpoint(
+            service=service,
+            run_id=run_id,
+            checkpoint_path=checkpoint_path,
+            poll_interval_seconds=poll_interval_seconds,
+            timeout_seconds=timeout_seconds,
+        )
     return checkpoint_path
 
 
@@ -144,8 +147,22 @@ def create_lora_checkpoint(
         stage=stage,
         poll_interval_seconds=poll_interval_seconds,
         timeout_seconds=timeout_seconds,
+        wait_for_checkpoint=True,
     )
-    return TrainingCheckpoint(run_id=run_id, checkpoint_path=checkpoint_path)
+    sampler_checkpoint_path = _save_new_checkpoint(
+        service=service,
+        run_id=run_id,
+        save_state_callable=train_client.save_weights_for_sampler,
+        stage=stage,
+        poll_interval_seconds=poll_interval_seconds,
+        timeout_seconds=timeout_seconds,
+        wait_for_checkpoint=False,
+    )
+    return TrainingCheckpoint(
+        run_id=run_id,
+        checkpoint_path=checkpoint_path,
+        sampler_checkpoint_path=sampler_checkpoint_path,
+    )
 
 
 def continue_from_checkpoint(
@@ -167,8 +184,29 @@ def continue_from_checkpoint(
         stage=stage,
         poll_interval_seconds=poll_interval_seconds,
         timeout_seconds=timeout_seconds,
+        wait_for_checkpoint=True,
     )
-    return TrainingCheckpoint(run_id=run_id, checkpoint_path=new_checkpoint_path)
+    sampler_checkpoint_path = _save_new_checkpoint(
+        service=service,
+        run_id=run_id,
+        save_state_callable=train_client.save_weights_for_sampler,
+        stage=stage,
+        poll_interval_seconds=poll_interval_seconds,
+        timeout_seconds=timeout_seconds,
+        wait_for_checkpoint=False,
+    )
+    return TrainingCheckpoint(
+        run_id=run_id,
+        checkpoint_path=new_checkpoint_path,
+        sampler_checkpoint_path=sampler_checkpoint_path,
+    )
+
+
+def _sampling_model_path_candidates(model_path: str) -> list[str]:
+    candidates = [model_path]
+    if "/sampler_weights/" not in model_path and "/weights/" in model_path:
+        candidates.append(model_path.replace("/weights/", "/sampler_weights/", 1))
+    return candidates
 
 
 def sample_prompts(
@@ -188,7 +226,20 @@ def sample_prompts(
         raise ValueError("prompt_rows length must match prompts length")
 
     if model_path:
-        sampler = service.create_sampling_client(model_path=model_path)
+        sampler = None
+        last_error: Exception | None = None
+        for candidate in _sampling_model_path_candidates(model_path):
+            try:
+                sampler = service.create_sampling_client(model_path=candidate)
+                break
+            except Exception as exc:  # pragma: no cover - integration-specific API behavior
+                last_error = exc
+                if "sampler_weights" not in str(exc):
+                    raise
+        if sampler is None:
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError("Failed to initialize sampling client from model_path")
     elif base_model:
         sampler = service.create_sampling_client(base_model=base_model)
     else:
@@ -308,7 +359,7 @@ def run_real_rl(*, cfg: ProjectConfig) -> dict[str, object]:
         prompt_rows=prompts,
         stage="rl",
         model_label="teacher",
-        model_path=checkpoint.checkpoint_path,
+        model_path=checkpoint.sampler_checkpoint_path,
         max_tokens=16,
         seed=cfg.seed,
     )
@@ -323,6 +374,7 @@ def run_real_rl(*, cfg: ProjectConfig) -> dict[str, object]:
             "quality_score": quality_score,
             "stability_score": stability_score,
             "checkpoint_path": checkpoint.checkpoint_path,
+            "sampler_checkpoint_path": checkpoint.sampler_checkpoint_path,
             "run_id": checkpoint.run_id,
             "rl_stability_score": stability_score,
             "rl_nan_events": 0,
@@ -336,6 +388,7 @@ def run_real_rl(*, cfg: ProjectConfig) -> dict[str, object]:
             run_id=checkpoint.run_id,
             provider_raw={
                 "checkpoint_path": checkpoint.checkpoint_path,
+                "sampler_checkpoint_path": checkpoint.sampler_checkpoint_path,
                 "sampling_session_id": sampled.session_id,
                 "stage": "rl",
             },
@@ -365,7 +418,7 @@ def run_real_fsdp(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> 
         prompt_rows=prompts,
         stage="fsdp",
         model_label="teacher",
-        model_path=checkpoint.checkpoint_path,
+        model_path=checkpoint.sampler_checkpoint_path,
         max_tokens=20,
         seed=cfg.seed,
     )
@@ -381,6 +434,7 @@ def run_real_fsdp(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> 
             "quality_score": quality_score,
             "stability_score": stability_score,
             "checkpoint_path": checkpoint.checkpoint_path,
+            "sampler_checkpoint_path": checkpoint.sampler_checkpoint_path,
             "run_id": checkpoint.run_id,
             "axolotl_fsdp": True,
             "rl_stability_score": float(teacher_payload.get("rl_stability_score", 0.92)),
@@ -398,6 +452,7 @@ def run_real_fsdp(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> 
             provider_raw={
                 "source_checkpoint_path": prior_checkpoint,
                 "checkpoint_path": checkpoint.checkpoint_path,
+                "sampler_checkpoint_path": checkpoint.sampler_checkpoint_path,
                 "sampling_session_id": sampled.session_id,
                 "stage": "fsdp",
             },
@@ -406,7 +461,9 @@ def run_real_fsdp(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> 
 
 
 def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> dict[str, object]:
-    teacher_checkpoint_path = str(teacher_payload.get("checkpoint_path", "")).strip()
+    teacher_checkpoint_path = str(
+        teacher_payload.get("sampler_checkpoint_path", teacher_payload.get("checkpoint_path", ""))
+    ).strip()
     if not teacher_checkpoint_path:
         raise RuntimeError("Distill stage requires teacher checkpoint_path from FSDP stage")
 
@@ -440,7 +497,7 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
         prompt_rows=prompts,
         stage="distill",
         model_label="student",
-        model_path=student_checkpoint.checkpoint_path,
+        model_path=student_checkpoint.sampler_checkpoint_path,
         max_tokens=24,
         seed=cfg.seed,
     )
@@ -460,6 +517,7 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
             "compression_ratio": 8.0,
             "stability_score": 0.88,
             "checkpoint_path": student_checkpoint.checkpoint_path,
+            "sampler_checkpoint_path": student_checkpoint.sampler_checkpoint_path,
             "run_id": student_checkpoint.run_id,
             "distill_stability_score": 0.88,
             "distill_nan_events": 0,
@@ -476,6 +534,7 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
                 "student_sampling_session_id": student_samples.session_id,
                 "teacher_checkpoint_path": teacher_checkpoint_path,
                 "student_checkpoint_path": student_checkpoint.checkpoint_path,
+                "student_sampler_checkpoint_path": student_checkpoint.sampler_checkpoint_path,
                 "stage": "distill",
             },
         ),
@@ -506,8 +565,12 @@ def run_real_eval(
     prompt_texts = [row.prompt for row in prompts]
     references = [row.reference for row in prompts]
 
-    teacher_checkpoint_path = str(teacher_payload.get("checkpoint_path", "")).strip()
-    student_checkpoint_path = str(student_payload.get("checkpoint_path", "")).strip()
+    teacher_checkpoint_path = str(
+        teacher_payload.get("sampler_checkpoint_path", teacher_payload.get("checkpoint_path", ""))
+    ).strip()
+    student_checkpoint_path = str(
+        student_payload.get("sampler_checkpoint_path", student_payload.get("checkpoint_path", ""))
+    ).strip()
 
     baseline = sample_prompts(
         service=service,
