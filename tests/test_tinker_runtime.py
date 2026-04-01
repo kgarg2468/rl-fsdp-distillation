@@ -3,6 +3,7 @@ from inference_projects.tinker_runtime import (
     CANARY_FIXTURE_PATH,
     _cost_per_1k,
     _sampling_model_path_candidates,
+    continue_from_checkpoint,
     create_lora_checkpoint,
     load_canary_prompts,
 )
@@ -82,5 +83,50 @@ def test_create_lora_checkpoint_uses_sampler_weights_save(monkeypatch):
     )
     assert checkpoint.checkpoint_path == "tinker://x/weights/y"
     assert checkpoint.sampler_checkpoint_path == "tinker://x/sampler_weights/y"
+    assert [entry["callable_name"] for entry in captured] == ["save_state", "save_weights_for_sampler"]
+    assert [entry["wait_for_checkpoint"] for entry in captured] == [True, False]
+
+
+def test_continue_from_checkpoint_uses_sampler_weights_save(monkeypatch):
+    captured: list[dict[str, object]] = []
+
+    class FakeTrainClient:
+        def __init__(self):
+            self.model_id = "model-2"
+
+        def get_info(self):
+            return type("Info", (), {"model_id": self.model_id})()
+
+        def save_state(self, name):
+            raise AssertionError("save_state should not be used for sampling checkpoints")
+
+        def save_weights_for_sampler(self, name):
+            return type("Resp", (), {"result": lambda self: type("Saved", (), {"path": "tinker://x/sampler_weights/z"})()})()
+
+    class FakeService:
+        def create_training_client_from_state(self, checkpoint_path, user_metadata=None):
+            _ = (checkpoint_path, user_metadata)
+            return FakeTrainClient()
+
+    def fake_save_new_checkpoint(**kwargs):
+        entry = {
+            "callable_name": kwargs["save_state_callable"].__name__,
+            "wait_for_checkpoint": kwargs["wait_for_checkpoint"],
+        }
+        captured.append(entry)
+        if kwargs["save_state_callable"].__name__ == "save_state":
+            return "tinker://x/weights/z"
+        return "tinker://x/sampler_weights/z"
+
+    monkeypatch.setattr("inference_projects.tinker_runtime._save_new_checkpoint", fake_save_new_checkpoint)
+    checkpoint = continue_from_checkpoint(
+        service=FakeService(),
+        checkpoint_path="tinker://x/weights/y",
+        stage="fsdp",
+        poll_interval_seconds=1,
+        timeout_seconds=1,
+    )
+    assert checkpoint.checkpoint_path == "tinker://x/weights/z"
+    assert checkpoint.sampler_checkpoint_path == "tinker://x/sampler_weights/z"
     assert [entry["callable_name"] for entry in captured] == ["save_state", "save_weights_for_sampler"]
     assert [entry["wait_for_checkpoint"] for entry in captured] == [True, False]
