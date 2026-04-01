@@ -13,6 +13,8 @@ from inference_projects.config import ProjectConfig
 from inference_projects.pricing import TokenUsage, cost_usd
 
 REAL_USAGE_KEY = "_usage"
+PROMPT_TRACES_KEY = "_prompt_traces"
+EVAL_ROWS_KEY = "_eval_rows"
 CANARY_FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "real_eval_prompts.jsonl"
 
 
@@ -29,6 +31,7 @@ class SamplingBatch:
     prefill_tokens: int
     sample_tokens: int
     session_id: str | None
+    trace_rows: list[dict[str, object]]
 
 
 @dataclass(frozen=True)
@@ -172,12 +175,18 @@ def sample_prompts(
     *,
     service: ServiceClient,
     prompts: list[str],
+    prompt_rows: list[PromptRow] | None = None,
+    stage: str = "",
+    model_label: str = "",
     base_model: str | None = None,
     model_path: str | None = None,
     max_tokens: int = 24,
     seed: int = 42,
     temperature: float = 0.2,
 ) -> SamplingBatch:
+    if prompt_rows is not None and len(prompt_rows) != len(prompts):
+        raise ValueError("prompt_rows length must match prompts length")
+
     if model_path:
         sampler = service.create_sampling_client(model_path=model_path)
     elif base_model:
@@ -189,10 +198,12 @@ def sample_prompts(
     outputs: list[str] = []
     prefill_tokens = 0
     sample_tokens = 0
+    trace_rows: list[dict[str, object]] = []
 
-    for prompt in prompts:
+    for idx, prompt in enumerate(prompts):
         prompt_ids = tokenizer.encode(prompt)
-        prefill_tokens += len(prompt_ids)
+        prefill_count = len(prompt_ids)
+        prefill_tokens += prefill_count
         response = sampler.sample(
             prompt=ModelInput.from_ints(prompt_ids),
             num_samples=1,
@@ -200,11 +211,41 @@ def sample_prompts(
         ).result()
         if not response.sequences:
             outputs.append("")
+            sample_count = 0
+            output_text = ""
+            row = prompt_rows[idx] if prompt_rows is not None else PromptRow(row_id=f"row-{idx + 1}", prompt=prompt, reference="")
+            trace_rows.append(
+                {
+                    "row_id": row.row_id,
+                    "prompt": prompt,
+                    "reference": row.reference,
+                    "output": output_text,
+                    "prefill_tokens": prefill_count,
+                    "sample_tokens": sample_count,
+                    "stage": stage,
+                    "model_label": model_label,
+                }
+            )
             continue
         sampled = response.sequences[0]
         token_ids = list(sampled.tokens)
-        sample_tokens += len(token_ids)
-        outputs.append(tokenizer.decode(token_ids).strip())
+        sample_count = len(token_ids)
+        sample_tokens += sample_count
+        output_text = tokenizer.decode(token_ids).strip()
+        outputs.append(output_text)
+        row = prompt_rows[idx] if prompt_rows is not None else PromptRow(row_id=f"row-{idx + 1}", prompt=prompt, reference="")
+        trace_rows.append(
+            {
+                "row_id": row.row_id,
+                "prompt": prompt,
+                "reference": row.reference,
+                "output": output_text,
+                "prefill_tokens": prefill_count,
+                "sample_tokens": sample_count,
+                "stage": stage,
+                "model_label": model_label,
+            }
+        )
 
     session_id = getattr(sampler, "_sampling_session_id", None)
     return SamplingBatch(
@@ -212,6 +253,7 @@ def sample_prompts(
         prefill_tokens=prefill_tokens,
         sample_tokens=sample_tokens,
         session_id=str(session_id) if session_id else None,
+        trace_rows=trace_rows,
     )
 
 
@@ -263,6 +305,9 @@ def run_real_rl(*, cfg: ProjectConfig) -> dict[str, object]:
     sampled = sample_prompts(
         service=service,
         prompts=[row.prompt for row in prompts],
+        prompt_rows=prompts,
+        stage="rl",
+        model_label="teacher",
         model_path=checkpoint.checkpoint_path,
         max_tokens=16,
         seed=cfg.seed,
@@ -282,6 +327,7 @@ def run_real_rl(*, cfg: ProjectConfig) -> dict[str, object]:
             "rl_stability_score": stability_score,
             "rl_nan_events": 0,
             "notes": "Real RL stage executed via Tinker training checkpoint workflow.",
+            PROMPT_TRACES_KEY: sampled.trace_rows,
         },
         "usage": _usage_dict(
             prefill_tokens=sampled.prefill_tokens,
@@ -316,6 +362,9 @@ def run_real_fsdp(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> 
     sampled = sample_prompts(
         service=service,
         prompts=[row.prompt for row in prompts],
+        prompt_rows=prompts,
+        stage="fsdp",
+        model_label="teacher",
         model_path=checkpoint.checkpoint_path,
         max_tokens=20,
         seed=cfg.seed,
@@ -339,6 +388,7 @@ def run_real_fsdp(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> 
             "fsdp_stability_score": stability_score,
             "fsdp_nan_events": 0,
             "notes": "Real FSDP stage checkpointed via Tinker continuation workflow.",
+            PROMPT_TRACES_KEY: sampled.trace_rows,
         },
         "usage": _usage_dict(
             prefill_tokens=sampled.prefill_tokens,
@@ -367,6 +417,9 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
     teacher_samples = sample_prompts(
         service=service,
         prompts=prompt_texts,
+        prompt_rows=prompts,
+        stage="distill",
+        model_label="teacher",
         model_path=teacher_checkpoint_path,
         max_tokens=24,
         seed=cfg.seed,
@@ -384,6 +437,9 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
     student_samples = sample_prompts(
         service=service,
         prompts=prompt_texts,
+        prompt_rows=prompts,
+        stage="distill",
+        model_label="student",
         model_path=student_checkpoint.checkpoint_path,
         max_tokens=24,
         seed=cfg.seed,
@@ -408,6 +464,7 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
             "distill_stability_score": 0.88,
             "distill_nan_events": 0,
             "notes": "Real distillation stage sampled teacher outputs and checkpointed student model.",
+            PROMPT_TRACES_KEY: [*teacher_samples.trace_rows, *student_samples.trace_rows],
         },
         "usage": _usage_dict(
             prefill_tokens=teacher_samples.prefill_tokens + student_samples.prefill_tokens,
@@ -455,6 +512,9 @@ def run_real_eval(
     baseline = sample_prompts(
         service=service,
         prompts=prompt_texts,
+        prompt_rows=prompts,
+        stage="eval",
+        model_label="baseline",
         base_model=cfg.baseline_model,
         max_tokens=24,
         seed=cfg.seed,
@@ -462,6 +522,9 @@ def run_real_eval(
     teacher = sample_prompts(
         service=service,
         prompts=prompt_texts,
+        prompt_rows=prompts,
+        stage="eval",
+        model_label="teacher",
         model_path=teacher_checkpoint_path if teacher_checkpoint_path else None,
         base_model=None if teacher_checkpoint_path else cfg.teacher_model,
         max_tokens=24,
@@ -470,6 +533,9 @@ def run_real_eval(
     student = sample_prompts(
         service=service,
         prompts=prompt_texts,
+        prompt_rows=prompts,
+        stage="eval",
+        model_label="student",
         model_path=student_checkpoint_path if student_checkpoint_path else None,
         base_model=None if student_checkpoint_path else cfg.student_model,
         max_tokens=24,
@@ -509,6 +575,32 @@ def run_real_eval(
     distill_stability = float(
         student_payload.get("distill_stability_score", student_payload.get("stability_score", 0.87))
     )
+
+    eval_rows: list[dict[str, object]] = []
+    for row, baseline_output, teacher_output, student_output, baseline_overlap, teacher_overlap, student_overlap in zip(
+        prompts,
+        baseline.outputs,
+        teacher.outputs,
+        student.outputs,
+        baseline_scores,
+        teacher_scores,
+        student_scores,
+    ):
+        eval_rows.append(
+            {
+                "row_id": row.row_id,
+                "prompt": row.prompt,
+                "reference": row.reference,
+                "baseline_output": baseline_output,
+                "teacher_output": teacher_output,
+                "student_output": student_output,
+                "baseline_overlap": round(baseline_overlap, 4),
+                "teacher_overlap": round(teacher_overlap, 4),
+                "student_overlap": round(student_overlap, 4),
+                "student_vs_baseline_win": 1.0 if student_overlap > baseline_overlap else 0.0,
+                "student_vs_teacher_win": 1.0 if student_overlap > teacher_overlap else 0.0,
+            }
+        )
 
     return {
         "payload": {
@@ -551,6 +643,8 @@ def run_real_eval(
                 },
             },
             "notes": "Real eval stage executed across baseline, teacher, and student checkpoints.",
+            PROMPT_TRACES_KEY: [*baseline.trace_rows, *teacher.trace_rows, *student.trace_rows],
+            EVAL_ROWS_KEY: eval_rows,
         },
         "usage": _usage_dict(
             prefill_tokens=baseline.prefill_tokens + teacher.prefill_tokens + student.prefill_tokens,
