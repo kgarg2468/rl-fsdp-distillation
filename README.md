@@ -3,9 +3,9 @@
 ## Project Aim
 Build a reproducible, budget-capped training-and-evaluation pipeline that models an RL -> FSDP fine-tuning -> distillation lifecycle and produces auditable artifacts (checkpoints, metrics, spend ledger, and report).
 
-This repository is intentionally a scaffold + roadmap:
+This repository provides both a deterministic local path and a live Tinker-backed path:
 - It already implements deterministic local pipeline mechanics in `mock` mode.
-- It defines clear integration seams for production services in `real` mode.
+- It runs end-to-end against Tinker services in `real` mode.
 
 ## Current Status (Implemented vs Planned)
 | Implemented now | Planned next |
@@ -39,7 +39,7 @@ rl -> fsdp -> distill -> eval -> report
 
 Run modes:
 - `mock` (default): deterministic local adapters, reproducible outputs for demos/tests.
-- `real`: adapter interfaces exist, but stage implementations intentionally raise `NotImplementedError` until integrations are wired.
+- `real`: stage adapters execute against Tinker (training checkpoints + sampling) and emit provider-derived usage metadata for ledger accounting.
 
 ## Tech Stack
 - Language/runtime: Python `>=3.11` (uses `tomllib` from stdlib).
@@ -48,7 +48,7 @@ Run modes:
 - Testing + quality: Pytest, custom style checks (`src/inference_projects/style_checks.py`), local verifier (`scripts/verify_local.sh`).
 - Execution UX: Makefile targets plus CLI entrypoint (`python -m inference_projects.cli ...`).
 - Design patterns: runtime adapter pattern (`mock` vs `real`), schema validators, persistent ledger model.
-- Integration targets (scaffolded): Tinker API, AWS environment, Axolotl/FSDP training backends.
+- Integration targets: Tinker API for training and sampling workloads.
 
 ## Methods, Algorithms, and Evaluation Logic
 ### Implemented mechanics
@@ -56,7 +56,8 @@ Run modes:
 - Budget guardrails:
   - Per-stage budget cap checks.
   - Global hard-cap enforcement across cumulative projected spend.
-- Deterministic actual-token scaling factors per stage to simulate under-projection execution in mock mode.
+- Deterministic actual-token scaling factors per stage in mock mode.
+- Real-mode accounting from adapter-emitted usage tokens (prefill/sample/train), with cost computed from configured rates when provider cost is unavailable.
 - Quality/cost reporting math:
   - Baseline/teacher/student benchmark values.
   - Student retention vs teacher.
@@ -160,23 +161,32 @@ Config contract (`config/default.toml`):
 - `token_rates_per_million`: prefill/sample/train rates
 - `token_caps`: stage token caps
 - `models`: teacher/student/baseline names
-- `runtime`: default mode, warning band, required env vars for real mode
+- `runtime`: default mode, warning band, required env vars for real mode, and real-mode polling settings
 
-## Real-Mode Integration Plan
-Current `real` mode status:
-- Preflight enforces required environment variables:
-  - `TINKER_API_KEY`
-  - `TINKER_BASE_URL`
-  - `AWS_PROFILE`
-  - `AWS_DEFAULT_REGION`
-- Stage adapters in real mode are scaffold placeholders that raise `NotImplementedError`.
+## Real-Mode Runbook
+Required environment variables for `--mode real`:
+- `TINKER_API_KEY`
+- `TINKER_BASE_URL`
 
-Integration sequence:
-1. Implement `RealRLAdapter.run(...)` with Tinker RL job submission and result normalization.
-2. Implement `RealFSDPAdapter.run(...)` with Axolotl/FSDP launch + checkpoint materialization.
-3. Implement `RealDistillAdapter.run(...)` with teacher output generation + student training.
-4. Implement `RealEvalAdapter.run(...)` with benchmark + LLM-judge data ingestion and scoring.
-5. Preserve current schema outputs so existing report + ledger pipeline remains stable.
+Recommended first run is a canary profile:
+- Config: `config/real_canary.toml`
+- Execute stage-by-stage before `all`.
+
+Canary sequence:
+```bash
+set -a && source .env && set +a
+python -m inference_projects.cli preflight --mode real --config config/real_canary.toml --state-dir /tmp/inference-real
+python -m inference_projects.cli dryrun --mode real --config config/real_canary.toml --state-dir /tmp/inference-real
+python -m inference_projects.cli rl --mode real --config config/real_canary.toml --state-dir /tmp/inference-real
+python -m inference_projects.cli fsdp --mode real --config config/real_canary.toml --state-dir /tmp/inference-real
+python -m inference_projects.cli distill --mode real --config config/real_canary.toml --state-dir /tmp/inference-real
+python -m inference_projects.cli eval --mode real --config config/real_canary.toml --state-dir /tmp/inference-real
+python -m inference_projects.cli report --mode real --config config/real_canary.toml --state-dir /tmp/inference-real
+```
+
+Notes:
+- Real runs use dynamic run/checkpoint IDs from Tinker responses.
+- Preflight guardrails still use projected spend; ledger records actual spend from runtime usage.
 
 ## Limitations and Non-Goals
 - Not a production training platform in current form.
@@ -186,17 +196,17 @@ Integration sequence:
 - No claim of a shipped production RL algorithm implementation.
 
 ## Roadmap
-1. Replace each real adapter scaffold with integrated service-backed execution.
-2. Add integration tests for real mode with safe stubs/mocks for external dependencies.
-3. Add richer artifact lineage and observability (run IDs, job links, trace metadata).
-4. Parameterize evaluation suites and benchmark datasets.
+1. Improve stage-specific training logic depth (currently minimal canary-safe training/checkpoint flows).
+2. Add richer artifact lineage and observability (job links, request IDs, timing traces).
+3. Expand benchmark fixture coverage and scoring strategies.
+4. Harden retry/backoff strategies for long-running real workloads.
 5. Introduce reproducible experiment packaging for handoff across environments.
 
 ## Troubleshooting
 - `ModuleNotFoundError: No module named 'tomllib'`:
   - Use Python `3.11+` (this project requires stdlib `tomllib`).
 - `Preflight failed for mode 'real'` with missing env vars:
-  - Export required real-mode variables before running `--mode real`.
+  - Export `TINKER_API_KEY` and `TINKER_BASE_URL` before running `--mode real`.
 - `Projected total ... exceeds hard cap` or stage cap exceeded:
   - Adjust `budget` and/or `token_caps` in `config/default.toml`.
 - `Required artifact missing` during later stages:
