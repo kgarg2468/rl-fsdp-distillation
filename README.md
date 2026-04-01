@@ -188,6 +188,41 @@ Notes:
 - Real runs use dynamic run/checkpoint IDs from Tinker responses.
 - Preflight guardrails still use projected spend; ledger records actual spend from runtime usage.
 
+### Real-Mode Audit Bundle (Detailed Forensics)
+In addition to existing artifacts, a real staged run now emits a dedicated audit bundle:
+- `artifacts/audit/run_manifest.json`
+- `artifacts/audit/stage_rl.json`
+- `artifacts/audit/stage_fsdp.json`
+- `artifacts/audit/stage_distill.json`
+- `artifacts/audit/stage_eval.json`
+- `artifacts/audit/eval_rows.jsonl`
+- `artifacts/reports/run_audit_report.md`
+
+Each stage audit file includes:
+- stage timing (`started_at`, `finished_at`, `duration_seconds`)
+- projected vs actual spend and token usage
+- cumulative spend snapshots before/after the stage
+- provider lineage (`run_id`, `provider_raw`) and stage payload snapshot
+- prompt-level traces when available (`_prompt_traces`)
+
+`eval_rows.jsonl` contains full per-row eval evidence:
+- prompt/reference text
+- baseline/teacher/student outputs
+- overlap scores and row-level win indicators
+
+Recommended one-shot credited execution order (fresh state dir):
+```bash
+set -a && source .env && set +a
+STATE_DIR="$(mktemp -d /tmp/inference-real-audit.XXXXXX)"
+python -m inference_projects.cli preflight --mode real --config config/default.toml --state-dir "$STATE_DIR"
+python -m inference_projects.cli dryrun --mode real --config config/default.toml --state-dir "$STATE_DIR"
+python -m inference_projects.cli rl --mode real --config config/default.toml --state-dir "$STATE_DIR"
+python -m inference_projects.cli fsdp --mode real --config config/default.toml --state-dir "$STATE_DIR"
+python -m inference_projects.cli distill --mode real --config config/default.toml --state-dir "$STATE_DIR"
+python -m inference_projects.cli eval --mode real --config config/default.toml --state-dir "$STATE_DIR"
+python -m inference_projects.cli report --mode real --config config/default.toml --state-dir "$STATE_DIR"
+```
+
 ## Limitations and Non-Goals
 - Not a production training platform in current form.
 - No real distributed training execution is wired yet.
