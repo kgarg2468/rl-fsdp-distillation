@@ -35,6 +35,8 @@ class RuntimeConfig:
     projection_warning_min_usd: float
     projection_warning_max_usd: float
     real_required_env: tuple[str, ...]
+    real_poll_interval_seconds: int
+    real_poll_timeout_seconds: int
 
 
 def _token_caps_by_stage(raw: dict[str, int]) -> dict[str, TokenUsage]:
@@ -73,6 +75,10 @@ def _validate_runtime(runtime: RuntimeConfig) -> None:
         raise ValueError("runtime.real_required_env must not be empty")
     if any(not env.strip() for env in runtime.real_required_env):
         raise ValueError("runtime.real_required_env contains empty environment variable name")
+    if runtime.real_poll_interval_seconds <= 0:
+        raise ValueError("runtime.real_poll_interval_seconds must be > 0")
+    if runtime.real_poll_timeout_seconds <= 0:
+        raise ValueError("runtime.real_poll_timeout_seconds must be > 0")
 
 
 def load_config(path: Path | str = Path("config/default.toml")) -> ProjectConfig:
@@ -97,9 +103,11 @@ def load_config(path: Path | str = Path("config/default.toml")) -> ProjectConfig
             str(name)
             for name in runtime_raw.get(
                 "real_required_env",
-                ["TINKER_API_KEY", "TINKER_BASE_URL", "AWS_PROFILE", "AWS_DEFAULT_REGION"],
+                ["TINKER_API_KEY", "TINKER_BASE_URL"],
             )
         ),
+        real_poll_interval_seconds=int(runtime_raw.get("real_poll_interval_seconds", 15)),
+        real_poll_timeout_seconds=int(runtime_raw.get("real_poll_timeout_seconds", 3600)),
     )
     _validate_runtime(runtime)
 
