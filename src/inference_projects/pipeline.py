@@ -164,6 +164,237 @@ def _dryrun_summary(cfg: ProjectConfig, mode: str) -> dict[str, object]:
     }
 
 
+def _load_prior_spend(prior_ledger: Path | None) -> float:
+    if prior_ledger is None:
+        return 0.0
+    if not prior_ledger.exists():
+        raise FileNotFoundError(f"Prior ledger file not found: {prior_ledger}")
+    payload = json.loads(prior_ledger.read_text())
+    total_spend = payload.get("total_spend_usd")
+    if not isinstance(total_spend, (int, float)):
+        raise RuntimeError(f"Prior ledger missing numeric total_spend_usd: {prior_ledger}")
+    return round(float(total_spend), 4)
+
+
+def _campaign_required_artifacts(paths: PipelinePaths, stage: str) -> list[Path]:
+    if stage == "rl":
+        return [paths.teacher_ckpt]
+    if stage == "fsdp":
+        return [paths.teacher_ckpt]
+    if stage == "distill":
+        return [paths.student_ckpt]
+    if stage == "eval":
+        return [paths.eval_metrics, paths.eval_rows]
+    if stage == "report":
+        return [paths.report_md, paths.audit_report_md]
+    raise ValueError(f"Unknown stage for artifact verification: {stage}")
+
+
+def _verify_campaign_stage(
+    *,
+    stage: str,
+    paths: PipelinePaths,
+    ledger_records_before: int,
+) -> Ledger:
+    for path in _campaign_required_artifacts(paths, stage):
+        if not path.exists():
+            raise FileNotFoundError(f"Campaign stage '{stage}' missing required artifact: {path}")
+
+    if stage in REQUIRED_STAGES:
+        stage_audit_path = paths.stage_audit(stage)
+        if not stage_audit_path.exists():
+            raise FileNotFoundError(f"Campaign stage '{stage}' missing stage audit payload: {stage_audit_path}")
+        stage_audit_payload = audit.load_json(stage_audit_path)
+        if stage_audit_payload.get("status") != "completed":
+            raise RuntimeError(f"Campaign stage '{stage}' audit status is not completed: {stage_audit_path}")
+
+        ledger_after = load_ledger(paths.ledger)
+        if len(ledger_after.records) != ledger_records_before + 1:
+            raise RuntimeError(
+                f"Campaign stage '{stage}' expected ledger record increment by 1 "
+                f"(before={ledger_records_before}, after={len(ledger_after.records)})."
+            )
+        return ledger_after
+
+    return load_ledger(paths.ledger)
+
+
+def run_campaign(
+    *,
+    cfg: ProjectConfig,
+    mode: str,
+    state_dir: Path,
+    prior_ledger: Path | None,
+    project_hard_cap_usd: float,
+) -> dict[str, object]:
+    if project_hard_cap_usd <= 0:
+        raise ValueError("project_hard_cap_usd must be > 0")
+    if mode == "real" and prior_ledger is None:
+        raise ValueError("Campaign in real mode requires --prior-ledger")
+
+    campaign_dir = state_dir / "campaign"
+    frozen_prompts_path = campaign_dir / "frozen_prompts.jsonl"
+    frozen_info = campaign_utils.freeze_prompt_file(
+        source_path=cfg.evaluation.prompt_file,
+        frozen_path=frozen_prompts_path,
+        prompt_limit=cfg.evaluation.prompt_limit,
+    )
+    prior_spend_usd = _load_prior_spend(prior_ledger)
+
+    new_spend_usd = 0.0
+    stop_reason = ""
+    stopped_for_budget = False
+    run_rows: list[list[dict[str, Any]]] = []
+    run_summaries: list[dict[str, Any]] = []
+    early_stop = {"triggered": False, "evaluated_after_runs": 0, "checks": {}}
+    planned_seeds = list(cfg.campaign.seeds)[: cfg.campaign.max_runs]
+
+    for seed in planned_seeds:
+        run_dir = campaign_dir / "runs" / f"seed-{seed}"
+        run_paths = PipelinePaths(run_dir)
+        run_cfg = replace(
+            cfg,
+            seed=seed,
+            evaluation=replace(cfg.evaluation, prompt_file=frozen_prompts_path),
+        )
+        preflight_result = ensure_preflight_ready(mode=mode, cfg=run_cfg, state_dir=run_dir)
+        adapters = select_stage_adapters(mode)
+
+        stage_durations: dict[str, float] = {}
+        completed_stages: list[str] = []
+        run_halted = False
+
+        for stage in (*REQUIRED_STAGES, "report"):
+            if stage in REQUIRED_STAGES:
+                projected_stage_cost = budget.projected_stage_cost_usd(stage, run_cfg)
+                projected_total = prior_spend_usd + new_spend_usd + projected_stage_cost
+                if projected_total > project_hard_cap_usd:
+                    stopped_for_budget = True
+                    run_halted = True
+                    stop_reason = (
+                        f"Stopped before seed {seed} stage '{stage}': projected total "
+                        f"${projected_total:.4f} exceeds hard cap ${project_hard_cap_usd:.4f}."
+                    )
+                    break
+
+            stage_started = time.monotonic()
+            ledger_before = load_ledger(run_paths.ledger)
+            records_before = len(ledger_before.records)
+
+            if stage == "rl":
+                run_rl(run_cfg, run_paths, adapter=adapters.rl, mode=mode, preflight=preflight_result)
+            elif stage == "fsdp":
+                run_fsdp(run_cfg, run_paths, adapter=adapters.fsdp, mode=mode, preflight=preflight_result)
+            elif stage == "distill":
+                run_distill(run_cfg, run_paths, adapter=adapters.distill, mode=mode, preflight=preflight_result)
+            elif stage == "eval":
+                run_eval(run_cfg, run_paths, adapter=adapters.eval, mode=mode, preflight=preflight_result)
+            elif stage == "report":
+                run_report(run_cfg, run_paths, mode=mode, preflight=preflight_result)
+
+            stage_durations[stage] = round(time.monotonic() - stage_started, 4)
+            ledger_after = _verify_campaign_stage(stage=stage, paths=run_paths, ledger_records_before=records_before)
+            completed_stages.append(stage)
+
+            if stage in REQUIRED_STAGES:
+                delta = round(ledger_after.total_spend_usd - ledger_before.total_spend_usd, 4)
+                if delta < 0:
+                    raise RuntimeError(f"Campaign stage '{stage}' produced negative spend delta: {delta}")
+                new_spend_usd = round(new_spend_usd + delta, 4)
+
+        run_summary: dict[str, Any] = {
+            "seed": seed,
+            "run_dir": str(run_dir),
+            "stages_completed": completed_stages,
+            "stage_durations_seconds": stage_durations,
+            "actual_spend_usd": round(load_ledger(run_paths.ledger).total_spend_usd, 4),
+            "artifacts": {
+                "eval_report": str(run_paths.report_md),
+                "run_audit_report": str(run_paths.audit_report_md),
+                "eval_rows": str(run_paths.eval_rows),
+                "ledger": str(run_paths.ledger),
+            },
+        }
+
+        if "eval" in completed_stages:
+            eval_rows = audit.load_eval_rows(run_paths.eval_rows)
+            if not eval_rows:
+                raise RuntimeError(f"Campaign seed {seed} did not emit eval rows: {run_paths.eval_rows}")
+            run_rows.append(eval_rows)
+            run_summary["metrics"] = campaign_utils.summarize_eval_rows(
+                eval_rows=eval_rows,
+                bootstrap_reps=run_cfg.campaign.bootstrap_reps,
+                rng_seed=seed,
+            )
+
+        run_summaries.append(run_summary)
+
+        if run_halted:
+            break
+
+        complete_metric_runs = [run for run in run_summaries if "metrics" in run]
+        if len(complete_metric_runs) == 2 and run_cfg.campaign.min_runs <= 2:
+            decision = campaign_utils.should_early_stop_after_two_runs(
+                first=complete_metric_runs[0]["metrics"],
+                second=complete_metric_runs[1]["metrics"],
+                threshold=run_cfg.campaign.early_stop_threshold,
+            )
+            early_stop = {
+                "triggered": bool(decision["stop"]),
+                "evaluated_after_runs": 2,
+                "checks": decision["checks"],
+            }
+            if decision["stop"]:
+                stop_reason = "Stopped after 2 runs because early-stop variance criteria were satisfied."
+                break
+
+    complete_metrics = [run["metrics"] for run in run_summaries if "metrics" in run]
+    if complete_metrics:
+        across_runs = campaign_utils.summarize_across_runs(complete_metrics)
+        pooled = campaign_utils.summarize_pooled_rows(
+            eval_rows_by_run=run_rows,
+            bootstrap_reps=cfg.campaign.bootstrap_reps,
+            rng_seed=cfg.seed,
+        )
+    else:
+        across_runs = {"runs": 0, "mean": {}, "std": {}}
+        pooled = {"rows": 0, "means": {}, "ci95": {}}
+
+    summary: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "mode": mode,
+        "planned_seeds": planned_seeds,
+        "executed_seeds": [run["seed"] for run in run_summaries],
+        "frozen_prompts": frozen_info.as_dict(),
+        "runs": run_summaries,
+        "aggregate": {
+            "across_runs": across_runs,
+            "pooled": pooled,
+        },
+        "early_stop": early_stop,
+        "budget": {
+            "hard_cap_usd": round(project_hard_cap_usd, 4),
+            "prior_spend_usd": round(prior_spend_usd, 4),
+            "new_spend_usd": round(new_spend_usd, 4),
+            "total_spend_usd": round(prior_spend_usd + new_spend_usd, 4),
+            "stopped_for_budget": stopped_for_budget,
+            "prior_ledger_path": str(prior_ledger) if prior_ledger else None,
+        },
+        "stop_reason": stop_reason,
+    }
+
+    summary_path = campaign_dir / "campaign_summary.json"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+    report_path = campaign_dir / "campaign_report.md"
+    report_path.write_text(campaign_utils.format_campaign_report(summary))
+    summary["artifacts"] = {
+        "campaign_summary": str(summary_path),
+        "campaign_report": str(report_path),
+    }
+    return summary
+
+
 def _projected_and_actual_mock(stage: str, cfg: ProjectConfig) -> tuple[TokenUsage, float, TokenUsage, float]:
     projected_tokens = budget.stage_token_usage(stage, cfg)
     projected_cost = budget.projected_stage_cost_usd(stage, cfg)
