@@ -119,20 +119,29 @@ make report MODE=mock
 
 Full pipeline:
 ```bash
-make all MODE=mock STATE_DIR=/tmp/inference-demo
+make all-run MODE=mock
 ```
 
 Campaign pipeline (multi-seed with global cap):
 ```bash
-make campaign MODE=real CONFIG=config/default.toml STATE_DIR=/tmp/inference-campaign PRIOR_LEDGER=/tmp/prior-ledger.json PROJECT_HARD_CAP_USD=35.0
+make campaign-run MODE=real CONFIG=config/default.toml PROJECT_HARD_CAP_USD=35.0
+```
+
+Print/create next run directory under `<repo>/runs`:
+```bash
+make run-dir
 ```
 
 CLI equivalents (public interface):
 ```bash
-python -m inference_projects.cli preflight --mode mock --config config/default.toml --state-dir /tmp/inference-demo
-python -m inference_projects.cli dryrun --mode mock --config config/default.toml --state-dir /tmp/inference-demo
-python -m inference_projects.cli all --mode mock --config config/default.toml --state-dir /tmp/inference-demo
-python -m inference_projects.cli campaign --mode real --config config/default.toml --state-dir /tmp/inference-campaign --prior-ledger /tmp/prior-ledger.json --project-hard-cap-usd 35.0
+RUN_DIR="$(python scripts/allocate_run_dir.py --root runs)"
+python -m inference_projects.cli preflight --mode mock --config config/default.toml --state-dir "$RUN_DIR"
+python -m inference_projects.cli dryrun --mode mock --config config/default.toml --state-dir "$RUN_DIR"
+python -m inference_projects.cli all --mode mock --config config/default.toml --state-dir "$RUN_DIR"
+
+RUN_DIR="$(python scripts/allocate_run_dir.py --root runs)"
+PRIOR_LEDGER="$(python scripts/allocate_run_dir.py --root runs --latest-ledger)"
+python -m inference_projects.cli campaign --mode real --config config/default.toml --state-dir "$RUN_DIR" --prior-ledger "$PRIOR_LEDGER" --project-hard-cap-usd 35.0
 ```
 
 Supported CLI commands:
@@ -148,6 +157,11 @@ Supported CLI commands:
 - `campaign`
 
 ## Artifacts and Schemas
+Run directory convention:
+- All new runs go under `runs/run-###`.
+- Single run artifacts: `runs/run-###/artifacts/...`
+- Campaign artifacts: `runs/run-###/campaign/...`
+
 Artifact contract under `artifacts/`:
 - `artifacts/checkpoints/teacher/best_checkpoint.json`
 - `artifacts/checkpoints/student/best_checkpoint.json`
@@ -184,13 +198,14 @@ Recommended first run is a canary profile:
 Canary sequence:
 ```bash
 set -a && source .env && set +a
-python -m inference_projects.cli preflight --mode real --config config/real_canary.toml --state-dir /tmp/inference-real
-python -m inference_projects.cli dryrun --mode real --config config/real_canary.toml --state-dir /tmp/inference-real
-python -m inference_projects.cli rl --mode real --config config/real_canary.toml --state-dir /tmp/inference-real
-python -m inference_projects.cli fsdp --mode real --config config/real_canary.toml --state-dir /tmp/inference-real
-python -m inference_projects.cli distill --mode real --config config/real_canary.toml --state-dir /tmp/inference-real
-python -m inference_projects.cli eval --mode real --config config/real_canary.toml --state-dir /tmp/inference-real
-python -m inference_projects.cli report --mode real --config config/real_canary.toml --state-dir /tmp/inference-real
+RUN_DIR="$(python scripts/allocate_run_dir.py --root runs)"
+python -m inference_projects.cli preflight --mode real --config config/real_canary.toml --state-dir "$RUN_DIR"
+python -m inference_projects.cli dryrun --mode real --config config/real_canary.toml --state-dir "$RUN_DIR"
+python -m inference_projects.cli rl --mode real --config config/real_canary.toml --state-dir "$RUN_DIR"
+python -m inference_projects.cli fsdp --mode real --config config/real_canary.toml --state-dir "$RUN_DIR"
+python -m inference_projects.cli distill --mode real --config config/real_canary.toml --state-dir "$RUN_DIR"
+python -m inference_projects.cli eval --mode real --config config/real_canary.toml --state-dir "$RUN_DIR"
+python -m inference_projects.cli report --mode real --config config/real_canary.toml --state-dir "$RUN_DIR"
 ```
 
 Notes:
@@ -222,7 +237,7 @@ Each stage audit file includes:
 Recommended one-shot credited execution order (fresh state dir):
 ```bash
 set -a && source .env && set +a
-STATE_DIR="$(mktemp -d /tmp/inference-real-audit.XXXXXX)"
+STATE_DIR="$(python scripts/allocate_run_dir.py --root runs)"
 python -m inference_projects.cli preflight --mode real --config config/default.toml --state-dir "$STATE_DIR"
 python -m inference_projects.cli dryrun --mode real --config config/default.toml --state-dir "$STATE_DIR"
 python -m inference_projects.cli rl --mode real --config config/default.toml --state-dir "$STATE_DIR"
@@ -235,8 +250,9 @@ python -m inference_projects.cli report --mode real --config config/default.toml
 Campaign orchestration (2-3 seeds with early stop + global cap):
 ```bash
 set -a && source .env && set +a
-STATE_DIR="$(mktemp -d /tmp/inference-campaign.XXXXXX)"
-python -m inference_projects.cli campaign --mode real --config config/default.toml --state-dir "$STATE_DIR" --prior-ledger /path/to/previous/artifacts/ledger.json --project-hard-cap-usd 35.0
+STATE_DIR="$(python scripts/allocate_run_dir.py --root runs)"
+PRIOR_LEDGER="$(python scripts/allocate_run_dir.py --root runs --latest-ledger)"
+python -m inference_projects.cli campaign --mode real --config config/default.toml --state-dir "$STATE_DIR" --prior-ledger "$PRIOR_LEDGER" --project-hard-cap-usd 35.0
 ```
 
 Campaign outputs:
