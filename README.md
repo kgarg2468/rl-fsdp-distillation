@@ -1,7 +1,7 @@
-# RL + FSDP + Distillation
+# RL + Teacher FT + Distillation
 
 ## Project Aim
-Build a reproducible, budget-capped training-and-evaluation pipeline that models an RL -> FSDP fine-tuning -> distillation lifecycle and produces auditable artifacts (checkpoints, metrics, spend ledger, and report).
+Build a reproducible, budget-capped training-and-evaluation pipeline that models an RL -> Teacher FT fine-tuning -> distillation lifecycle and produces auditable artifacts (checkpoints, metrics, spend ledger, and report).
 
 This repository provides both a deterministic local path and a live Tinker-backed path:
 - It already implements deterministic local pipeline mechanics in `mock` mode.
@@ -10,8 +10,8 @@ This repository provides both a deterministic local path and a live Tinker-backe
 ## Current Status (Implemented vs Planned)
 | Implemented now | Planned next |
 | --- | --- |
-| Deterministic mock stage adapters for `rl`, `fsdp`, `distill`, `eval` | Real Tinker RL adapter implementation |
-| Stage budget checks + global hard-cap enforcement | Real Axolotl/FSDP launcher integration |
+| Deterministic mock stage adapters for `rl`, `teacher_ft`, `distill`, `eval` | Real Tinker RL adapter implementation |
+| Stage budget checks + global hard-cap enforcement | Real Axolotl/Teacher FT launcher integration |
 | Schema validation for checkpoints, eval payload, and ledger | Real distillation job/data wiring |
 | Ledger accounting for projected vs actual cost/token usage | Real benchmark + LLM-judge integrations |
 | Markdown eval report generation with quality/cost/stability sections | Production telemetry and service-specific observability |
@@ -28,7 +28,7 @@ config/default.toml
    preflight checks  ---> fail fast on invalid setup/budget/env
         |
         v
-rl -> fsdp -> distill -> eval -> report
+rl -> teacher_ft -> distill -> eval -> report
  |      |        |        |       |
  |      |        |        |       +--> artifacts/reports/eval_report.md
  |      |        |        +----------> artifacts/eval/eval_metrics.json
@@ -62,11 +62,11 @@ Run modes:
   - Baseline/teacher/student benchmark values.
   - Student retention vs teacher.
   - Teacher vs student inference cost per 1k tokens and savings percentage.
-- Training stability reporting per stage (`rl`, `fsdp`, `distill`) including NaN event counters.
+- Training stability reporting per stage (`rl`, `teacher_ft`, `distill`) including NaN event counters.
 
 ### Planned algorithms and integrations
 - Production RL method selection and concrete training job orchestration.
-- True FSDP backend execution (Axolotl launch + distributed runtime wiring).
+- True Teacher FT backend execution (Axolotl launch + distributed runtime wiring).
 - Production distillation data generation and student training loop.
 - External evaluation service integrations (benchmarks and LLM-judge pipelines).
 
@@ -80,7 +80,7 @@ Default budget config (from `config/default.toml`):
 
 Default projected stage costs from token caps and rates:
 - `rl`: `$8.39`
-- `fsdp`: `$5.46`
+- `teacher_ft`: `$5.46`
 - `distill`: `$5.06`
 - `eval`: `$1.33`
 - Total projected: `$20.24`
@@ -111,7 +111,7 @@ make dryrun MODE=mock
 Stage-by-stage commands:
 ```bash
 make rl MODE=mock
-make fsdp MODE=mock
+make teacher_ft MODE=mock
 make distill MODE=mock
 make eval MODE=mock
 make report MODE=mock
@@ -146,7 +146,7 @@ python -m inference_projects.cli campaign --mode real --config config/default.to
 
 Supported CLI commands:
 - `rl`
-- `fsdp`
+- `teacher_ft`
 - `distill`
 - `eval`
 - `report`
@@ -202,7 +202,7 @@ RUN_DIR="$(python scripts/allocate_run_dir.py --root runs)"
 python -m inference_projects.cli preflight --mode real --config config/real_canary.toml --state-dir "$RUN_DIR"
 python -m inference_projects.cli dryrun --mode real --config config/real_canary.toml --state-dir "$RUN_DIR"
 python -m inference_projects.cli rl --mode real --config config/real_canary.toml --state-dir "$RUN_DIR"
-python -m inference_projects.cli fsdp --mode real --config config/real_canary.toml --state-dir "$RUN_DIR"
+python -m inference_projects.cli teacher_ft --mode real --config config/real_canary.toml --state-dir "$RUN_DIR"
 python -m inference_projects.cli distill --mode real --config config/real_canary.toml --state-dir "$RUN_DIR"
 python -m inference_projects.cli eval --mode real --config config/real_canary.toml --state-dir "$RUN_DIR"
 python -m inference_projects.cli report --mode real --config config/real_canary.toml --state-dir "$RUN_DIR"
@@ -216,7 +216,7 @@ Notes:
 In addition to existing artifacts, a real staged run now emits a dedicated audit bundle:
 - `artifacts/audit/run_manifest.json`
 - `artifacts/audit/stage_rl.json`
-- `artifacts/audit/stage_fsdp.json`
+- `artifacts/audit/stage_teacher_ft.json`
 - `artifacts/audit/stage_distill.json`
 - `artifacts/audit/stage_eval.json`
 - `artifacts/audit/eval_rows.jsonl`
@@ -241,7 +241,7 @@ STATE_DIR="$(python scripts/allocate_run_dir.py --root runs)"
 python -m inference_projects.cli preflight --mode real --config config/default.toml --state-dir "$STATE_DIR"
 python -m inference_projects.cli dryrun --mode real --config config/default.toml --state-dir "$STATE_DIR"
 python -m inference_projects.cli rl --mode real --config config/default.toml --state-dir "$STATE_DIR"
-python -m inference_projects.cli fsdp --mode real --config config/default.toml --state-dir "$STATE_DIR"
+python -m inference_projects.cli teacher_ft --mode real --config config/default.toml --state-dir "$STATE_DIR"
 python -m inference_projects.cli distill --mode real --config config/default.toml --state-dir "$STATE_DIR"
 python -m inference_projects.cli eval --mode real --config config/default.toml --state-dir "$STATE_DIR"
 python -m inference_projects.cli report --mode real --config config/default.toml --state-dir "$STATE_DIR"
@@ -283,6 +283,6 @@ Campaign outputs:
 - `Projected total ... exceeds hard cap` or stage cap exceeded:
   - Adjust `budget` and/or `token_caps` in `config/default.toml`.
 - `Required artifact missing` during later stages:
-  - Run stages in order (`rl` -> `fsdp` -> `distill` -> `eval` -> `report`) or use `all`.
+  - Run stages in order (`rl` -> `teacher_ft` -> `distill` -> `eval` -> `report`) or use `all`.
 - `State directory is not writable`:
   - Pass a writable `--state-dir` or `STATE_DIR`.
