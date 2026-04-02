@@ -56,7 +56,17 @@ flowchart TD
 
 ## Runtime Modes & Guardrails
 
-_Work in progress in this commit: section scaffold only._
+| Mode | Behavior | Requirements |
+| --- | --- | --- |
+| `mock` | Uses deterministic local stage adapters for `rl`, `teacher_ft`, `distill`, and `eval`. | No external API credentials required. |
+| `real` | Routes stage execution through Tinker runtime adapters and records provider usage metadata. | `TINKER_API_KEY` and `TINKER_BASE_URL` must be set. |
+
+Guardrails currently enforced in code:
+- `preflight` validates runtime mode, required env vars for `real`, and state-dir writability.
+- `dryrun` reports projected stage and cumulative spend from `token_caps` + `token_rates_per_million`.
+- Projection warnings are emitted when projected total is outside `runtime.projection_warning_min_usd` to `runtime.projection_warning_max_usd`.
+- Campaign and tuning flows enforce strict run caps (`campaign.strict_run_cap`, `tuning.strict_run_cap`).
+- Real-mode payloads must include required usage fields (`prefill_tokens`, `sample_tokens`, `train_tokens`, `run_id`, `provider_raw`) before ledger/audit writes.
 
 ## Runbook (Make + CLI)
 
