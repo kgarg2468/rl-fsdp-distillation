@@ -256,3 +256,34 @@ def test_tune_reports_spend_telemetry(tmp_path: Path, monkeypatch: pytest.Monkey
     assert summary["status"] == "ok"
     assert "spend" in summary
     assert summary["spend"]["total_spend_usd"] >= 0.0
+
+
+def test_tune_strict_run_cap_enforced_with_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg_path = tmp_path / "tight_cap.toml"
+    cfg_text = Path("config/default.toml").read_text()
+    prefix, suffix = cfg_text.split("[tuning]", 1)
+    suffix = suffix.replace("strict_run_cap = 16", "strict_run_cap = 1", 1)
+    cfg_text = prefix + "[tuning]" + suffix
+    cfg_path.write_text(cfg_text)
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("TINKER_API_KEY", "dummy")
+    monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
+    _patch_fake_real_adapters(monkeypatch, regime="good")
+
+    with pytest.raises(RuntimeError):
+        run_pipeline_command(
+            "tune",
+            mode="real",
+            state_dir=state_dir,
+            config_path=cfg_path,
+        )
+
+    summary_path = state_dir / "tuning" / "tuning_summary.json"
+    report_path = state_dir / "tuning" / "tuning_report.md"
+    candidates_path = state_dir / "tuning" / "candidates.jsonl"
+    assert summary_path.exists()
+    assert report_path.exists()
+    assert candidates_path.exists()
+    payload = json.loads(summary_path.read_text())
+    assert payload["status"] == "failed"
+    assert payload["failure_class"] in {"invariant_failed", "failed"}
