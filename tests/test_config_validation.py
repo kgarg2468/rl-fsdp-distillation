@@ -30,6 +30,7 @@ def test_real_canary_config_loads_successfully():
     assert cfg.evaluation.eval_max_tokens_candidates == (48, 96)
     assert cfg.evaluation.teacher_integrity_numeric_parse_threshold == 0.8
     assert cfg.distillation.training_prompt_limit == 150
+    assert cfg.distillation.training_prompt_file is None
     assert cfg.distillation.filter_profile == "moderate"
     assert cfg.distillation.lora_rank == 8
     assert cfg.campaign.seeds == (17, 29, 43)
@@ -63,4 +64,27 @@ def test_invalid_retry_config_rejected(tmp_path: Path):
     text = text.replace("retry_delay_max_seconds = 10.0", "retry_delay_max_seconds = 0.1")
     cfg_path.write_text(text)
     with pytest.raises(ValueError):
+        load_config(cfg_path)
+
+
+def test_distillation_training_prompt_file_resolves_relative_path(tmp_path: Path):
+    cfg_path = tmp_path / "with_training_prompt.toml"
+    prompt_path = tmp_path / "curated_train.jsonl"
+    prompt_path.write_text('{"id":"r1","prompt":"1+1","reference":"2"}\n')
+    text = Path("config/default.toml").read_text()
+    text = text.replace("training_prompt_limit = 150", 'training_prompt_limit = 150\ntraining_prompt_file = "curated_train.jsonl"')
+    cfg_path.write_text(text)
+    cfg = load_config(cfg_path)
+    assert cfg.distillation.training_prompt_file == prompt_path.resolve()
+
+
+def test_distillation_training_prompt_file_must_exist(tmp_path: Path):
+    cfg_path = tmp_path / "missing_training_prompt.toml"
+    text = Path("config/default.toml").read_text()
+    text = text.replace(
+        "training_prompt_limit = 150",
+        'training_prompt_limit = 150\ntraining_prompt_file = "does_not_exist.jsonl"',
+    )
+    cfg_path.write_text(text)
+    with pytest.raises(FileNotFoundError):
         load_config(cfg_path)
