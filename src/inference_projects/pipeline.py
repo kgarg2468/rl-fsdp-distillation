@@ -126,12 +126,11 @@ def run_pipeline_command(
         )
 
     if command == "tune":
+        _ = (prior_ledger, project_hard_cap_usd)
         return run_tune(
             cfg=cfg,
             mode=resolved_mode,
             state_dir=paths.root,
-            prior_ledger=Path(prior_ledger) if prior_ledger else None,
-            project_hard_cap_usd=float(project_hard_cap_usd),
         )
 
     preflight_result = ensure_preflight_ready(mode=resolved_mode, cfg=cfg, state_dir=paths.root)
@@ -447,14 +446,7 @@ def run_tune(
     cfg: ProjectConfig,
     mode: str,
     state_dir: Path,
-    prior_ledger: Path | None,
-    project_hard_cap_usd: float,
 ) -> dict[str, object]:
-    if project_hard_cap_usd <= 0:
-        raise ValueError("project_hard_cap_usd must be > 0")
-    if mode == "real" and prior_ledger is None:
-        raise ValueError("Tune command in real mode requires --prior-ledger")
-
     tuning_dir = state_dir / "tuning"
     stage1_frozen = tuning_utils.freeze_prompt_slice(
         source_path=cfg.evaluation.prompt_file,
@@ -467,15 +459,9 @@ def run_tune(
         prompt_limit=cfg.tuning.stage2_prompt_limit,
     )
 
-    prior_spend_usd = _load_prior_spend(prior_ledger)
-    remaining_budget_usd = max(0.0, round(project_hard_cap_usd - prior_spend_usd, 4))
-    sweep_cap_usd = round(remaining_budget_usd * cfg.tuning.sweep_budget_fraction, 4)
-    confirm_cap_usd = round(remaining_budget_usd - sweep_cap_usd, 4)
-
     sweep_spend_usd = 0.0
     confirm_spend_usd = 0.0
     project_new_spend_usd = 0.0
-    cap_hit = False
     stop_reason = ""
     status = "ok"
 
@@ -509,11 +495,6 @@ def run_tune(
                 eval_temperature=float(spec["eval_temperature"]),
                 teacher_prompt_template=str(spec["teacher_prompt_template"]),
                 distill_overrides={},
-                prior_spend_usd=prior_spend_usd,
-                project_new_spend_so_far_usd=project_new_spend_usd,
-                phase_spend_so_far_usd=sweep_spend_usd,
-                phase_cap_usd=sweep_cap_usd,
-                project_hard_cap_usd=project_hard_cap_usd,
             )
             fallback_error = ""
             fallback_teacher_model = ""
@@ -535,11 +516,6 @@ def run_tune(
                 eval_temperature=float(fallback_spec["eval_temperature"]),
                 teacher_prompt_template=str(fallback_spec["teacher_prompt_template"]),
                 distill_overrides={},
-                prior_spend_usd=prior_spend_usd,
-                project_new_spend_so_far_usd=project_new_spend_usd,
-                phase_spend_so_far_usd=sweep_spend_usd,
-                phase_cap_usd=sweep_cap_usd,
-                project_hard_cap_usd=project_hard_cap_usd,
             )
             spec = fallback_spec
 
@@ -553,12 +529,6 @@ def run_tune(
             row["fallback_error"] = fallback_error
         candidate_rows.append(row)
         teacher_rows.append(row)
-
-        if bool(result["stopped_for_budget"]):
-            cap_hit = True
-            stop_reason = str(result["stop_reason"])
-            status = "stopped_for_budget"
-            break
 
     teacher_ranked = tuning_utils.rank_teacher_candidates(teacher_rows)
     teacher_winner = teacher_ranked[0] if teacher_ranked else None
@@ -589,11 +559,6 @@ def run_tune(
                     "epochs": int(spec["epochs"]),
                     "lora_rank": int(spec["lora_rank"]),
                 },
-                prior_spend_usd=prior_spend_usd,
-                project_new_spend_so_far_usd=project_new_spend_usd,
-                phase_spend_so_far_usd=sweep_spend_usd,
-                phase_cap_usd=sweep_cap_usd,
-                project_hard_cap_usd=project_hard_cap_usd,
             )
             run_summary = result["run_summary"]
             sweep_spend_usd = round(sweep_spend_usd + float(result["new_spend_usd"]), 4)
@@ -609,12 +574,6 @@ def run_tune(
             row = _build_tune_candidate_row(spec=merged, run_summary=run_summary, phase="distill_tuning")
             candidate_rows.append(row)
             distill_rows.append(row)
-
-            if bool(result["stopped_for_budget"]):
-                cap_hit = True
-                stop_reason = str(result["stop_reason"])
-                status = "stopped_for_budget"
-                break
 
     if status == "ok":
         promoted_rows = tuning_utils.promote_candidates(distill_rows, top_k=cfg.tuning.promotion_top_k)
@@ -644,11 +603,6 @@ def run_tune(
                     "epochs": int(promoted["epochs"]),
                     "lora_rank": int(promoted["lora_rank"]),
                 },
-                prior_spend_usd=prior_spend_usd,
-                project_new_spend_so_far_usd=project_new_spend_usd,
-                phase_spend_so_far_usd=confirm_spend_usd,
-                phase_cap_usd=confirm_cap_usd,
-                project_hard_cap_usd=project_hard_cap_usd,
             )
             run_summary = result["run_summary"]
             confirm_spend_usd = round(confirm_spend_usd + float(result["new_spend_usd"]), 4)
@@ -657,12 +611,6 @@ def run_tune(
             row = _build_tune_candidate_row(spec=promoted, run_summary=run_summary, phase="confirm")
             candidate_rows.append(row)
             confirmation_rows.append(row)
-
-            if bool(result["stopped_for_budget"]):
-                cap_hit = True
-                stop_reason = str(result["stop_reason"])
-                status = "stopped_for_budget"
-                break
 
     winner_row: dict[str, Any] | None = None
     if status == "ok":
@@ -698,18 +646,10 @@ def run_tune(
             evaluation=final_eval,
             distillation=final_distill,
         )
-        campaign_prior_path = tuning_dir / "final_campaign_prior_ledger.json"
-        campaign_prior_payload = {"total_spend_usd": round(prior_spend_usd + project_new_spend_usd, 4)}
-        campaign_prior_path.parent.mkdir(parents=True, exist_ok=True)
-        campaign_prior_path.write_text(json.dumps(campaign_prior_payload) + "\n")
-
-        campaign_cap = round(prior_spend_usd + sweep_spend_usd + confirm_cap_usd, 4)
         campaign_summary = run_campaign(
             cfg=final_cfg,
             mode=mode,
             state_dir=tuning_dir / "final_campaign",
-            prior_ledger=campaign_prior_path,
-            project_hard_cap_usd=min(project_hard_cap_usd, campaign_cap),
         )
         final_campaign_summary = campaign_summary
         final_campaign_new_spend = float(campaign_summary.get("budget", {}).get("new_spend_usd", 0.0))
@@ -722,10 +662,6 @@ def run_tune(
             "executed_seeds": campaign_summary.get("executed_seeds", []),
             "campaign_status": campaign_summary.get("campaign_status", ""),
         }
-
-    total_spend_usd = round(prior_spend_usd + project_new_spend_usd, 4)
-    if total_spend_usd >= project_hard_cap_usd:
-        cap_hit = True
 
     acceptance_checks = {
         "teacher_margin_winner_pass": bool(winner_row and float(winner_row.get("teacher_minus_baseline", 0.0)) >= 0.05),
@@ -769,18 +705,11 @@ def run_tune(
             "distill_candidates": len(distill_rows),
             "confirmation_candidates": len(confirmation_rows),
         },
-        "budget": {
-            "hard_cap_usd": round(project_hard_cap_usd, 4),
-            "prior_spend_usd": round(prior_spend_usd, 4),
-            "remaining_budget_usd": round(remaining_budget_usd, 4),
-            "sweep_cap_usd": round(sweep_cap_usd, 4),
-            "confirm_cap_usd": round(confirm_cap_usd, 4),
+        "spend": {
             "sweep_spend_usd": round(sweep_spend_usd, 4),
             "confirm_spend_usd": round(confirm_spend_usd, 4),
             "new_spend_usd": round(project_new_spend_usd, 4),
-            "total_spend_usd": total_spend_usd,
-            "cap_hit": cap_hit,
-            "prior_ledger_path": str(prior_ledger) if prior_ledger else None,
+            "total_spend_usd": round(project_new_spend_usd, 4),
         },
     }
     if final_campaign_summary is not None:
@@ -848,11 +777,6 @@ def _run_tune_candidate(
     eval_temperature: float,
     teacher_prompt_template: str,
     distill_overrides: dict[str, object],
-    prior_spend_usd: float,
-    project_new_spend_so_far_usd: float,
-    phase_spend_so_far_usd: float,
-    phase_cap_usd: float,
-    project_hard_cap_usd: float,
 ) -> dict[str, object]:
     run_paths = PipelinePaths(run_dir)
     run_cfg = replace(
@@ -877,32 +801,9 @@ def _run_tune_candidate(
 
     stage_durations: dict[str, float] = {}
     completed_stages: list[str] = []
-    stop_reason = ""
-    stopped_for_budget = False
     candidate_new_spend = 0.0
 
     for stage in (*REQUIRED_STAGES, "report"):
-        if stage in REQUIRED_STAGES:
-            projected_stage_cost = budget.projected_stage_cost_usd(stage, run_cfg)
-            projected_total = (
-                prior_spend_usd + project_new_spend_so_far_usd + candidate_new_spend + projected_stage_cost
-            )
-            projected_phase = phase_spend_so_far_usd + candidate_new_spend + projected_stage_cost
-            if projected_total > project_hard_cap_usd:
-                stop_reason = (
-                    f"Stopped before stage '{stage}': projected total ${projected_total:.4f} "
-                    f"exceeds project hard cap ${project_hard_cap_usd:.4f}."
-                )
-                stopped_for_budget = True
-                break
-            if projected_phase > phase_cap_usd:
-                stop_reason = (
-                    f"Stopped before stage '{stage}': projected phase spend ${projected_phase:.4f} "
-                    f"exceeds phase cap ${phase_cap_usd:.4f}."
-                )
-                stopped_for_budget = True
-                break
-
         stage_started = time.monotonic()
         ledger_before = load_ledger(run_paths.ledger)
         records_before = len(ledger_before.records)
@@ -934,7 +835,7 @@ def _run_tune_candidate(
         "stages_completed": completed_stages,
         "stage_durations_seconds": stage_durations,
         "actual_spend_usd": round(load_ledger(run_paths.ledger).total_spend_usd, 4),
-        "stop_reason": stop_reason,
+        "stop_reason": "",
         "artifacts": {
             "eval_report": str(run_paths.report_md),
             "run_audit_report": str(run_paths.audit_report_md),
@@ -963,8 +864,6 @@ def _run_tune_candidate(
     return {
         "run_summary": run_summary,
         "new_spend_usd": round(candidate_new_spend, 4),
-        "stopped_for_budget": stopped_for_budget,
-        "stop_reason": stop_reason,
     }
 
 

@@ -183,7 +183,7 @@ def promote_candidates(candidates: list[dict[str, Any]], *, top_k: int) -> list[
 
 
 def format_tuning_report(summary: dict[str, Any]) -> str:
-    budget = summary.get("budget", {})
+    spend = summary.get("spend", {})
     checks = summary.get("acceptance_checks", {})
     winner = summary.get("winner", {})
     lines = [
@@ -193,15 +193,10 @@ def format_tuning_report(summary: dict[str, Any]) -> str:
         f"- Status: {summary.get('status', 'unknown')}",
         f"- Stop reason: {summary.get('stop_reason', '') or 'none'}",
         "",
-        "## Budget",
-        f"- Hard cap (USD): {budget.get('hard_cap_usd', 0.0)}",
-        f"- Prior spend (USD): {budget.get('prior_spend_usd', 0.0)}",
-        f"- Sweep cap (USD): {budget.get('sweep_cap_usd', 0.0)}",
-        f"- Confirm cap (USD): {budget.get('confirm_cap_usd', 0.0)}",
-        f"- Sweep spend (USD): {budget.get('sweep_spend_usd', 0.0)}",
-        f"- Confirm spend (USD): {budget.get('confirm_spend_usd', 0.0)}",
-        f"- Total spend (USD): {budget.get('total_spend_usd', 0.0)}",
-        f"- Cap hit: {budget.get('cap_hit', False)}",
+        "## Spend Telemetry",
+        f"- Sweep spend (USD): {spend.get('sweep_spend_usd', 0.0)}",
+        f"- Confirm spend (USD): {spend.get('confirm_spend_usd', 0.0)}",
+        f"- Total spend (USD): {spend.get('total_spend_usd', 0.0)}",
         "",
         "## Sweep",
         f"- Teacher runs executed: {summary.get('teacher_sweep', {}).get('runs_executed', 0)}",

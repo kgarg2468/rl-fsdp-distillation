@@ -98,15 +98,13 @@ class FakeRealEval:
         _ = (teacher_payload, student_payload, actual_cost_usd)
         prompt_rows = _load_prompt_rows(cfg)
 
-        baseline = 0.50
+        baseline = 0.45
         teacher = 0.52
-        if "70B" in cfg.teacher_model:
-            teacher += 0.05
         if cfg.distillation.teacher_prompt_template == "numeric_strict":
             teacher += 0.01
 
         if self._regime == "flat":
-            student = 0.50
+            student = 0.45
         else:
             gain = 0.01
             if cfg.distillation.filter_profile == "strict":
@@ -190,14 +188,8 @@ def _patch_fake_real_adapters(monkeypatch: pytest.MonkeyPatch, *, regime: Litera
     )
 
 
-def _write_prior_ledger(path: Path, total_spend_usd: float) -> None:
-    path.write_text(json.dumps({"total_spend_usd": total_spend_usd}) + "\n")
-
-
 def test_tune_real_mode_generates_summary_and_candidates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     state_dir = tmp_path / "state"
-    prior_ledger = tmp_path / "prior_ledger.json"
-    _write_prior_ledger(prior_ledger, total_spend_usd=0.0004)
     monkeypatch.setenv("TINKER_API_KEY", "dummy")
     monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
     _patch_fake_real_adapters(monkeypatch, regime="good")
@@ -206,8 +198,6 @@ def test_tune_real_mode_generates_summary_and_candidates(tmp_path: Path, monkeyp
         "tune",
         mode="real",
         state_dir=state_dir,
-        prior_ledger=prior_ledger,
-        project_hard_cap_usd=35.0,
     )
 
     assert summary is not None
@@ -234,8 +224,6 @@ def test_tune_real_mode_generates_summary_and_candidates(tmp_path: Path, monkeyp
 
 def test_tune_marks_needs_debug_when_strict_gate_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     state_dir = tmp_path / "state"
-    prior_ledger = tmp_path / "prior_ledger.json"
-    _write_prior_ledger(prior_ledger, total_spend_usd=0.0)
     monkeypatch.setenv("TINKER_API_KEY", "dummy")
     monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
     _patch_fake_real_adapters(monkeypatch, regime="flat")
@@ -244,8 +232,6 @@ def test_tune_marks_needs_debug_when_strict_gate_fails(tmp_path: Path, monkeypat
         "tune",
         mode="real",
         state_dir=state_dir,
-        prior_ledger=prior_ledger,
-        project_hard_cap_usd=35.0,
     )
 
     assert summary is not None
@@ -253,10 +239,8 @@ def test_tune_marks_needs_debug_when_strict_gate_fails(tmp_path: Path, monkeypat
     assert summary["final_campaign"]["executed"] is False
 
 
-def test_tune_stops_for_budget_when_remaining_is_too_small(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_tune_reports_spend_telemetry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     state_dir = tmp_path / "state"
-    prior_ledger = tmp_path / "prior_ledger.json"
-    _write_prior_ledger(prior_ledger, total_spend_usd=34.99)
     monkeypatch.setenv("TINKER_API_KEY", "dummy")
     monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
     _patch_fake_real_adapters(monkeypatch, regime="good")
@@ -265,10 +249,9 @@ def test_tune_stops_for_budget_when_remaining_is_too_small(tmp_path: Path, monke
         "tune",
         mode="real",
         state_dir=state_dir,
-        prior_ledger=prior_ledger,
-        project_hard_cap_usd=35.0,
     )
 
     assert summary is not None
-    assert summary["status"] == "stopped_for_budget"
-    assert summary["budget"]["cap_hit"] is True
+    assert summary["status"] == "ok"
+    assert "spend" in summary
+    assert summary["spend"]["total_spend_usd"] >= 0.0

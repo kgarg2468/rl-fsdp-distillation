@@ -184,12 +184,10 @@ def test_tune_runs_without_prior_ledger(tmp_path: Path, monkeypatch: pytest.Monk
     state_dir = tmp_path / "state"
     monkeypatch.setattr(
         "inference_projects.pipeline.run_tune",
-        lambda *, cfg, mode, state_dir, prior_ledger, project_hard_cap_usd: {
+        lambda *, cfg, mode, state_dir: {
             "status": "ok",
             "mode": mode,
             "state_dir": str(state_dir),
-            "hard_cap": project_hard_cap_usd,
-            "prior_ledger": prior_ledger,
         },
     )
     summary = run_pipeline_command("tune", mode="real", state_dir=state_dir)
