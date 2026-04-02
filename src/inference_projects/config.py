@@ -33,6 +33,13 @@ class RuntimeConfig:
     real_required_env: tuple[str, ...]
     real_poll_interval_seconds: int
     real_poll_timeout_seconds: int
+    retry_max_connections: int
+    retry_progress_timeout_seconds: float
+    retry_delay_base_seconds: float
+    retry_delay_max_seconds: float
+    retry_jitter_factor: float
+    retry_enabled: bool
+    max_consecutive_failures: int
 
 
 @dataclass(frozen=True)
@@ -112,6 +119,20 @@ def _validate_runtime(runtime: RuntimeConfig) -> None:
         raise ValueError("runtime.real_poll_interval_seconds must be > 0")
     if runtime.real_poll_timeout_seconds <= 0:
         raise ValueError("runtime.real_poll_timeout_seconds must be > 0")
+    if runtime.retry_max_connections <= 0:
+        raise ValueError("runtime.retry_max_connections must be > 0")
+    if runtime.retry_progress_timeout_seconds <= 0:
+        raise ValueError("runtime.retry_progress_timeout_seconds must be > 0")
+    if runtime.retry_delay_base_seconds <= 0:
+        raise ValueError("runtime.retry_delay_base_seconds must be > 0")
+    if runtime.retry_delay_max_seconds <= 0:
+        raise ValueError("runtime.retry_delay_max_seconds must be > 0")
+    if runtime.retry_delay_max_seconds < runtime.retry_delay_base_seconds:
+        raise ValueError("runtime.retry_delay_max_seconds must be >= runtime.retry_delay_base_seconds")
+    if not (0.0 <= runtime.retry_jitter_factor <= 1.0):
+        raise ValueError("runtime.retry_jitter_factor must be in [0, 1]")
+    if runtime.max_consecutive_failures <= 0:
+        raise ValueError("runtime.max_consecutive_failures must be > 0")
 
 
 def _validate_evaluation(evaluation: EvaluationConfig) -> None:
@@ -228,6 +249,13 @@ def load_config(path: Path | str = Path("config/default.toml")) -> ProjectConfig
         ),
         real_poll_interval_seconds=int(runtime_raw.get("real_poll_interval_seconds", 15)),
         real_poll_timeout_seconds=int(runtime_raw.get("real_poll_timeout_seconds", 3600)),
+        retry_max_connections=int(runtime_raw.get("retry_max_connections", 1000)),
+        retry_progress_timeout_seconds=float(runtime_raw.get("retry_progress_timeout_seconds", 7200)),
+        retry_delay_base_seconds=float(runtime_raw.get("retry_delay_base_seconds", 0.5)),
+        retry_delay_max_seconds=float(runtime_raw.get("retry_delay_max_seconds", 10.0)),
+        retry_jitter_factor=float(runtime_raw.get("retry_jitter_factor", 0.25)),
+        retry_enabled=bool(runtime_raw.get("retry_enabled", True)),
+        max_consecutive_failures=int(runtime_raw.get("max_consecutive_failures", 5)),
     )
     _validate_runtime(runtime)
     teacher_model = str(models["teacher"])

@@ -33,6 +33,13 @@ projection_warning_max_usd = 12.0
 real_required_env = ["TINKER_API_KEY", "TINKER_BASE_URL"]
 real_poll_interval_seconds = 15
 real_poll_timeout_seconds = 3600
+retry_max_connections = 1000
+retry_progress_timeout_seconds = 7200
+retry_delay_base_seconds = 0.5
+retry_delay_max_seconds = 10.0
+retry_jitter_factor = 0.25
+retry_enabled = true
+max_consecutive_failures = 5
 
 [evaluation]
 prompt_file = "src/inference_projects/fixtures/real_eval_prompts_150.jsonl"

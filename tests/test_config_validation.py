@@ -19,6 +19,9 @@ def test_real_canary_config_loads_successfully():
     assert cfg.runtime.real_required_env == ("TINKER_API_KEY", "TINKER_BASE_URL")
     assert cfg.runtime.real_poll_interval_seconds == 15
     assert cfg.runtime.real_poll_timeout_seconds == 3600
+    assert cfg.runtime.retry_max_connections == 1000
+    assert cfg.runtime.retry_enabled is True
+    assert cfg.runtime.max_consecutive_failures == 5
     assert cfg.evaluation.prompt_limit == 150
     assert cfg.evaluation.max_concurrency > 0
     assert cfg.evaluation.batch_size > 0
@@ -45,6 +48,15 @@ def test_empty_teacher_candidates_rejected(tmp_path: Path):
     cfg_path = tmp_path / "bad_tuning.toml"
     text = Path("config/default.toml").read_text()
     text = text.replace("teacher_candidates = [\"meta-llama/Llama-3.1-8B\"]", "teacher_candidates = []")
+    cfg_path.write_text(text)
+    with pytest.raises(ValueError):
+        load_config(cfg_path)
+
+
+def test_invalid_retry_config_rejected(tmp_path: Path):
+    cfg_path = tmp_path / "bad_retry.toml"
+    text = Path("config/default.toml").read_text()
+    text = text.replace("retry_delay_max_seconds = 10.0", "retry_delay_max_seconds = 0.1")
     cfg_path.write_text(text)
     with pytest.raises(ValueError):
         load_config(cfg_path)
