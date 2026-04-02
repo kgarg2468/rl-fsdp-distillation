@@ -159,12 +159,44 @@ Tune outputs:
 
 ## Configuration Surface
 
-_Work in progress in this commit: section scaffold only._
+Primary config file: `config/default.toml`.
+
+| Section | Active fields used by runtime |
+| --- | --- |
+| `[project]` | `name`, `seed` |
+| `[token_rates_per_million]` | `prefill`, `sample`, `train` |
+| `[token_caps]` | Stage token caps for `rl`, `teacher_ft`, `distill`, `eval` |
+| `[models]` | `teacher`, `student`, `baseline` |
+| `[runtime]` | `default_mode`, projection warning band, `real_required_env`, retry/poll settings |
+| `[evaluation]` | Prompt fixture path, prompt limit, concurrency, eval token/temperature controls, integrity thresholds |
+| `[distillation]` | Prompt limits and KD/training hyperparameters used by tune/distill flow |
+| `[campaign]` | Seed list, run bounds, bootstrap reps, early-stop threshold, strict cap |
+| `[tuning]` | Stage prompt limits, sweep budget, acceptance gates, strict cap |
+
+Canary profile for smaller real-mode runs: `config/real_canary.toml`.
 
 ## Testing & Verification
 
-_Work in progress in this commit: section scaffold only._
+```bash
+make test
+make verify
+```
+
+What is covered:
+- Unit and integration tests across adapters, CLI dispatch, pipeline orchestration, preflight, campaign logic, tuning logic, schemas, and report generation.
+- Golden report fixture checks in `tests/test_golden_report.py`.
+- Local quality gate script in `scripts/verify_local.sh`.
+
+Recommended quick doc sanity checks after README edits:
+
+```bash
+rg -n \"planned|PPO|GRPO|DPO|Axolotl launcher\" README.md
+rg -n \"tune|campaign|preflight|dryrun\" README.md
+```
 
 ## Current Limitations
 
-_Work in progress in this commit: section scaffold only._
+- This is an orchestration and evaluation harness; it does not ship a full standalone training infrastructure stack.
+- `real` mode depends on reachable Tinker services and valid credentials.
+- Default smoke behavior runs only the `rl` stage (`smoke` command).
+- The README documents current behavior only; it intentionally omits roadmap content.
