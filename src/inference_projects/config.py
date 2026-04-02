@@ -82,6 +82,7 @@ class CampaignConfig:
     max_runs: int
     bootstrap_reps: int
     early_stop_threshold: float
+    strict_run_cap: int
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,7 @@ class TuningConfig:
     sweep_runs: int
     teacher_candidates: tuple[str, ...]
     promotion_top_k: int
+    strict_run_cap: int
 
 
 def _token_caps_by_stage(raw: dict[str, int]) -> dict[str, TokenUsage]:
@@ -206,6 +208,8 @@ def _validate_campaign(campaign: CampaignConfig) -> None:
         raise ValueError("campaign.bootstrap_reps must be > 0")
     if campaign.early_stop_threshold < 0:
         raise ValueError("campaign.early_stop_threshold must be >= 0")
+    if campaign.strict_run_cap <= 0:
+        raise ValueError("campaign.strict_run_cap must be > 0")
 
 
 def _validate_tuning(tuning: TuningConfig) -> None:
@@ -223,6 +227,8 @@ def _validate_tuning(tuning: TuningConfig) -> None:
         raise ValueError("tuning.promotion_top_k must be > 0")
     if tuning.promotion_top_k > tuning.sweep_runs:
         raise ValueError("tuning.promotion_top_k cannot exceed tuning.sweep_runs")
+    if tuning.strict_run_cap <= 0:
+        raise ValueError("tuning.strict_run_cap must be > 0")
 
 
 def _resolve_path(config_path: Path, raw_path: str | Path) -> Path:
@@ -317,6 +323,7 @@ def load_config(path: Path | str = Path("config/default.toml")) -> ProjectConfig
         max_runs=int(campaign_raw.get("max_runs", 3)),
         bootstrap_reps=int(campaign_raw.get("bootstrap_reps", 5000)),
         early_stop_threshold=float(campaign_raw.get("early_stop_threshold", 0.03)),
+        strict_run_cap=int(campaign_raw.get("strict_run_cap", 16)),
     )
     _validate_campaign(campaign)
 
@@ -333,6 +340,7 @@ def load_config(path: Path | str = Path("config/default.toml")) -> ProjectConfig
             )
         ),
         promotion_top_k=int(tuning_raw.get("promotion_top_k", 2)),
+        strict_run_cap=int(tuning_raw.get("strict_run_cap", 16)),
     )
     _validate_tuning(tuning)
 
