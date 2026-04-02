@@ -73,7 +73,7 @@ class MockRLAdapter:
             "quality_score": 0.72,
             "stability_score": 0.91,
             "cost_usd": actual_cost_usd,
-            "notes": "Mock Tinker RL training completed under budget guardrails.",
+            "notes": "Mock Tinker RL training completed with telemetry-only spend logging.",
         }
 
 

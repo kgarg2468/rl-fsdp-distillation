@@ -133,7 +133,6 @@ def validate_stage_audit_payload(payload: dict[str, Any]) -> None:
             "duration_seconds": (int, float),
             "projected_cost_usd": (int, float),
             "actual_cost_usd": (int, float),
-            "stage_cap_usd": (int, float),
             "cumulative_total_before_usd": (int, float),
             "cumulative_total_after_usd": (int, float),
             "projected_tokens": dict,

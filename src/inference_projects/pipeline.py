@@ -1136,7 +1136,6 @@ def _write_stage_audit(
         "duration_seconds": round(duration_seconds, 4),
         "projected_cost_usd": round(projected_cost, 4),
         "actual_cost_usd": round(actual_cost, 4),
-        "stage_cap_usd": 0.0,
         "cumulative_total_before_usd": round(ledger_before.total_spend_usd, 4),
         "cumulative_total_after_usd": round(ledger_after.total_spend_usd, 4),
         "projected_tokens": projected_tokens.as_dict(),

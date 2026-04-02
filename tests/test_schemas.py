@@ -58,7 +58,6 @@ def test_stage_audit_schema_rejects_missing_usage_block():
                 "duration_seconds": 1.0,
                 "projected_cost_usd": 0.1,
                 "actual_cost_usd": 0.1,
-                "stage_cap_usd": 1.0,
                 "cumulative_total_before_usd": 0.0,
                 "cumulative_total_after_usd": 0.1,
                 "projected_tokens": {"prefill": 1, "sample": 1, "train": 0},
