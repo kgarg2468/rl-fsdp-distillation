@@ -122,7 +122,40 @@ python3 -m inference_projects.cli campaign --mode real --config config/default.t
 
 ## Artifacts & Run Directory Model
 
-_Work in progress in this commit: section scaffold only._
+The pipeline writes state into the provided `--state-dir`. Typical usage allocates a new directory under `runs/run-###`.
+
+Single-run artifact layout:
+
+- `artifacts/checkpoints/teacher/best_checkpoint.json`
+- `artifacts/checkpoints/student/best_checkpoint.json`
+- `artifacts/eval/eval_metrics.json`
+- `artifacts/reports/eval_report.md`
+- `artifacts/ledger.json`
+
+Audit bundle (written during staged runs):
+
+- `artifacts/audit/run_manifest.json`
+- `artifacts/audit/stage_rl.json`
+- `artifacts/audit/stage_teacher_ft.json`
+- `artifacts/audit/stage_distill.json`
+- `artifacts/audit/stage_eval.json`
+- `artifacts/audit/eval_rows.jsonl`
+- `artifacts/reports/run_audit_report.md`
+
+Campaign outputs:
+
+- `campaign/frozen_prompts.jsonl`
+- `campaign/campaign_summary.json`
+- `campaign/campaign_report.md`
+
+Tune outputs:
+
+- `tuning/frozen_prompts_stage2.jsonl`
+- `tuning/frozen_stage1_slices/slice_*.jsonl`
+- `tuning/sweeps/teacher/...`
+- `tuning/sweeps/distill/...`
+- `tuning/final_campaign/...` (when final campaign step executes)
+- `tuning/tune_summary.json`
 
 ## Configuration Surface
 
