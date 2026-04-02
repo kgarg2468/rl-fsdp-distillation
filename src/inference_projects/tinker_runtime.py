@@ -805,6 +805,9 @@ def run_real_eval(
     service = build_service_client()
     prompts = load_canary_prompts(limit=cfg.evaluation.prompt_limit, fixture_path=cfg.evaluation.prompt_file)
     prompt_texts = [row.prompt for row in prompts]
+    teacher_prompt_texts = [
+        _apply_prompt_template(row.prompt, cfg.distillation.teacher_prompt_template) for row in prompts
+    ]
     references = [row.reference for row in prompts]
 
     teacher_checkpoint_path = str(
@@ -830,7 +833,7 @@ def run_real_eval(
     )
     teacher = sample_prompts(
         service=service,
-        prompts=prompt_texts,
+        prompts=teacher_prompt_texts,
         prompt_rows=prompts,
         stage="eval",
         model_label="teacher",
