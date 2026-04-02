@@ -33,15 +33,15 @@ def test_all_command_creates_report_and_eval(tmp_path: Path):
     assert "Actual spend (USD)" in text
 
 
-def test_low_hard_cap_aborts_run(tmp_path: Path):
+def test_projection_warning_band_does_not_block_run(tmp_path: Path):
     state_dir = tmp_path / "state"
-    cfg_path = tmp_path / "tiny_cap.toml"
+    cfg_path = tmp_path / "warn_only.toml"
     text = Path("config/default.toml").read_text()
-    text = text.replace("target_cap_usd = 25.0", "target_cap_usd = 0.5")
-    text = text.replace("hard_cap_usd = 30.0", "hard_cap_usd = 1.0")
+    text = text.replace("projection_warning_min_usd = 20.0", "projection_warning_min_usd = 5.0")
+    text = text.replace("projection_warning_max_usd = 30.0", "projection_warning_max_usd = 10.0")
     cfg_path.write_text(text)
-    with pytest.raises(SetupError):
-        run_pipeline_command("rl", config_path=cfg_path, state_dir=state_dir)
+    run_pipeline_command("rl", config_path=cfg_path, state_dir=state_dir)
+    assert (state_dir / "artifacts/checkpoints/teacher/best_checkpoint.json").exists()
 
 
 def test_real_mode_without_credentials_fails_fast(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

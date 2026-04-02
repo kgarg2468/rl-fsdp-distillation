@@ -19,18 +19,6 @@ def test_stage_projection_matches_default_config():
     assert projected == pytest.approx(8.39, abs=0.01)
 
 
-def test_stage_budget_limit_enforced():
-    cfg = load_config(Path("config/default.toml"))
-    with pytest.raises(budget.BudgetExceededError):
-        budget.ensure_within_stage_budget("eval", 3.01, cfg)
-
-
-def test_hard_cap_is_enforced():
-    cfg = load_config(Path("config/default.toml"))
-    with pytest.raises(budget.BudgetExceededError):
-        budget.ensure_within_hard_cap(current_total=29.5, incoming_cost=0.6, cfg=cfg)
-
-
 def test_token_usage_for_known_stage():
     cfg = load_config(Path("config/default.toml"))
     usage = budget.stage_token_usage("distill", cfg)

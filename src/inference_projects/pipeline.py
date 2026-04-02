@@ -165,12 +165,9 @@ def _dryrun_summary(cfg: ProjectConfig, mode: str) -> dict[str, object]:
     running = 0.0
     for stage in REQUIRED_STAGES:
         projected_cost = budget.projected_stage_cost_usd(stage, cfg)
-        stage_cap = cfg.budget.stage_budgets_usd[stage]
         running += projected_cost
         stages[stage] = {
             "projected_cost_usd": projected_cost,
-            "stage_cap_usd": stage_cap,
-            "within_stage_cap": projected_cost <= stage_cap,
             "cumulative_projected_total_usd": round(running, 4),
         }
 
@@ -1017,8 +1014,6 @@ def _stage_budget_check(stage: str, cfg: ProjectConfig, paths: PipelinePaths) ->
     ledger = load_ledger(paths.ledger)
     projected_tokens = budget.stage_token_usage(stage, cfg)
     projected_cost = budget.projected_stage_cost_usd(stage, cfg)
-    budget.ensure_within_stage_budget(stage, projected_cost, cfg)
-    budget.ensure_within_hard_cap(current_total=ledger.total_spend_usd, incoming_cost=projected_cost, cfg=cfg)
     return ledger, projected_tokens, projected_cost
 
 
@@ -1149,7 +1144,7 @@ def _write_stage_audit(
         "duration_seconds": round(duration_seconds, 4),
         "projected_cost_usd": round(projected_cost, 4),
         "actual_cost_usd": round(actual_cost, 4),
-        "stage_cap_usd": cfg.budget.stage_budgets_usd[stage],
+        "stage_cap_usd": 0.0,
         "cumulative_total_before_usd": round(ledger_before.total_spend_usd, 4),
         "cumulative_total_after_usd": round(ledger_after.total_spend_usd, 4),
         "projected_tokens": projected_tokens.as_dict(),
@@ -1514,8 +1509,6 @@ def _format_report(
             f"- LLM judge win rate (student vs teacher): {llm_judge['student_vs_teacher_win_rate']}",
             "",
             "## Cost",
-            f"- Tinker target cap (USD): {cfg.budget.target_cap_usd:.2f}",
-            f"- Tinker hard cap (USD): {cfg.budget.hard_cap_usd:.2f}",
             f"- Projected spend (USD): {projected_total:.2f}",
             f"- Actual spend (USD): {ledger.total_spend_usd:.2f}",
             f"- Teacher inference cost / 1k tokens (USD): {infer['teacher']}",

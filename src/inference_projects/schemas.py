@@ -115,8 +115,6 @@ def validate_run_manifest_payload(payload: dict[str, Any]) -> None:
             "updated_at": str,
             "stages_expected": list,
             "stages_completed": list,
-            "target_cap_usd": (int, float),
-            "hard_cap_usd": (int, float),
             "state_dir": str,
         },
     )

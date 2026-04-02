@@ -54,8 +54,6 @@ def upsert_run_manifest(
         "updated_at": finished_at,
         "stages_expected": stage_order,
         "stages_completed": completed,
-        "target_cap_usd": cfg.budget.target_cap_usd,
-        "hard_cap_usd": cfg.budget.hard_cap_usd,
         "state_dir": str(state_dir),
         "warnings": list(warnings),
     }

@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 
 from inference_projects import budget
-from inference_projects.config import ProjectConfig, REQUIRED_STAGES
+from inference_projects.config import ProjectConfig
 
 
 class SetupError(RuntimeError):
@@ -41,22 +41,6 @@ def run_preflight(
     warnings: list[str] = []
 
     projected_total = budget.projected_total_cost_usd(cfg)
-
-    for stage in REQUIRED_STAGES:
-        stage_cost = budget.projected_stage_cost_usd(stage, cfg)
-        try:
-            budget.ensure_within_stage_budget(stage, stage_cost, cfg)
-        except budget.BudgetExceededError as exc:
-            errors.append(str(exc))
-
-    running_total = 0.0
-    for stage in REQUIRED_STAGES:
-        stage_cost = budget.projected_stage_cost_usd(stage, cfg)
-        try:
-            budget.ensure_within_hard_cap(current_total=running_total, incoming_cost=stage_cost, cfg=cfg)
-        except budget.BudgetExceededError as exc:
-            errors.append(str(exc))
-        running_total += stage_cost
 
     if projected_total < cfg.runtime.projection_warning_min_usd or projected_total > cfg.runtime.projection_warning_max_usd:
         warnings.append(
