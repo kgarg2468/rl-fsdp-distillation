@@ -60,6 +60,7 @@ class EvaluationConfig:
 @dataclass(frozen=True)
 class DistillationConfig:
     training_prompt_limit: int
+    training_prompt_file: Path | None
     teacher_prompt_template: str
     filter_profile: str
     hard_example_ratio: float
@@ -92,6 +93,11 @@ class TuningConfig:
     sweep_runs: int
     teacher_candidates: tuple[str, ...]
     promotion_top_k: int
+    min_teacher_margin: float
+    min_student_gain: float
+    min_student_exact_gain: float
+    min_student_numeric_parse: float
+    max_eval_duration_seconds: float
     strict_run_cap: int
 
 
@@ -165,6 +171,8 @@ def _validate_evaluation(evaluation: EvaluationConfig) -> None:
 def _validate_distillation(distillation: DistillationConfig) -> None:
     if distillation.training_prompt_limit <= 0:
         raise ValueError("distillation.training_prompt_limit must be > 0")
+    if distillation.training_prompt_file is not None and not distillation.training_prompt_file.exists():
+        raise FileNotFoundError(f"distillation.training_prompt_file does not exist: {distillation.training_prompt_file}")
     if distillation.teacher_prompt_template not in {"raw", "numeric_strict"}:
         raise ValueError("distillation.teacher_prompt_template must be 'raw' or 'numeric_strict'")
     if distillation.filter_profile not in {"moderate", "strict"}:
@@ -227,6 +235,16 @@ def _validate_tuning(tuning: TuningConfig) -> None:
         raise ValueError("tuning.promotion_top_k must be > 0")
     if tuning.promotion_top_k > tuning.sweep_runs:
         raise ValueError("tuning.promotion_top_k cannot exceed tuning.sweep_runs")
+    if tuning.min_teacher_margin < 0:
+        raise ValueError("tuning.min_teacher_margin must be >= 0")
+    if tuning.min_student_gain < 0:
+        raise ValueError("tuning.min_student_gain must be >= 0")
+    if tuning.min_student_exact_gain < 0:
+        raise ValueError("tuning.min_student_exact_gain must be >= 0")
+    if not (0.0 <= tuning.min_student_numeric_parse <= 1.0):
+        raise ValueError("tuning.min_student_numeric_parse must be in [0, 1]")
+    if tuning.max_eval_duration_seconds <= 0:
+        raise ValueError("tuning.max_eval_duration_seconds must be > 0")
     if tuning.strict_run_cap <= 0:
         raise ValueError("tuning.strict_run_cap must be > 0")
 
@@ -298,8 +316,12 @@ def load_config(path: Path | str = Path("config/default.toml")) -> ProjectConfig
     _validate_evaluation(evaluation)
 
     distillation_raw = data.get("distillation", {})
+    training_prompt_file_raw = distillation_raw.get("training_prompt_file")
     distillation = DistillationConfig(
         training_prompt_limit=int(distillation_raw.get("training_prompt_limit", 150)),
+        training_prompt_file=(
+            _resolve_path(config_path, str(training_prompt_file_raw)) if training_prompt_file_raw is not None else None
+        ),
         teacher_prompt_template=str(distillation_raw.get("teacher_prompt_template", "raw")),
         filter_profile=str(distillation_raw.get("filter_profile", "moderate")),
         hard_example_ratio=float(distillation_raw.get("hard_example_ratio", 0.4)),
@@ -340,6 +362,11 @@ def load_config(path: Path | str = Path("config/default.toml")) -> ProjectConfig
             )
         ),
         promotion_top_k=int(tuning_raw.get("promotion_top_k", 2)),
+        min_teacher_margin=float(tuning_raw.get("min_teacher_margin", 0.05)),
+        min_student_gain=float(tuning_raw.get("min_student_gain", 0.03)),
+        min_student_exact_gain=float(tuning_raw.get("min_student_exact_gain", 0.02)),
+        min_student_numeric_parse=float(tuning_raw.get("min_student_numeric_parse", 0.95)),
+        max_eval_duration_seconds=float(tuning_raw.get("max_eval_duration_seconds", 720.0)),
         strict_run_cap=int(tuning_raw.get("strict_run_cap", 16)),
     )
     _validate_tuning(tuning)
