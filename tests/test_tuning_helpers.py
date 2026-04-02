@@ -27,6 +27,18 @@ def test_teacher_headroom_candidates_are_deterministic():
     assert {row["max_tokens_eval"] for row in rows} == {48, 96}
 
 
+def test_teacher_headroom_candidates_respect_sweep_runs_and_teacher_candidates():
+    rows = teacher_headroom_candidates(
+        current_teacher="teacher-a",
+        stronger_teacher="teacher-b",
+        max_tokens_candidates=(48, 96),
+        teacher_candidates=("teacher-a", "teacher-b", "teacher-c"),
+        sweep_runs=10,
+    )
+    assert len(rows) == 10
+    assert set(row["teacher_model"] for row in rows).issubset({"teacher-a", "teacher-b", "teacher-c"})
+
+
 def test_distill_l8_candidates_cover_expected_knobs():
     rows = distill_l8_candidates()
     assert len(rows) == 8
@@ -45,14 +57,38 @@ def test_candidate_acceptance_applies_strict_thresholds():
             "baseline": 0.50,
             "teacher": 0.56,
             "student": 0.54,
+            "student_minus_baseline_exact_match": 0.03,
+            "student_numeric_parse_rate": 0.96,
         }
     }
-    checks = candidate_acceptance(metrics=metrics, integrity_passed=True)
-    assert checks == {
-        "teacher_margin_pass": True,
-        "student_gain_pass": True,
-        "integrity_pass": True,
+    checks = candidate_acceptance(metrics=metrics, integrity_passed=True, max_eval_duration_seconds=720.0)
+    assert checks["teacher_margin_pass"] is True
+    assert checks["student_gain_pass"] is True
+    assert checks["student_exact_gain_pass"] is True
+    assert checks["student_numeric_parse_pass"] is True
+    assert checks["eval_runtime_pass"] is True
+    assert checks["integrity_pass"] is True
+    assert checks["composite_pass"] is True
+
+
+def test_candidate_acceptance_fails_when_parse_or_exact_or_runtime_miss():
+    metrics = {
+        "means": {
+            "baseline": 0.50,
+            "teacher": 0.56,
+            "student": 0.54,
+            "student_minus_baseline_exact_match": 0.01,
+            "student_numeric_parse_rate": 0.70,
+        },
+        "eval_duration_seconds": 900.0,
     }
+    checks = candidate_acceptance(metrics=metrics, integrity_passed=True, max_eval_duration_seconds=720.0)
+    assert checks["teacher_margin_pass"] is True
+    assert checks["student_gain_pass"] is True
+    assert checks["student_exact_gain_pass"] is False
+    assert checks["student_numeric_parse_pass"] is False
+    assert checks["eval_runtime_pass"] is False
+    assert checks["composite_pass"] is False
 
 
 def test_rank_and_promote_candidates():
@@ -71,27 +107,39 @@ def test_rank_and_promote_candidates():
                 "candidate_id": "x",
                 "teacher_margin_pass": True,
                 "student_gain_pass": True,
+                "student_exact_gain_pass": True,
+                "student_numeric_parse_pass": True,
+                "eval_runtime_pass": True,
                 "integrity_pass": True,
                 "student_minus_baseline": 0.04,
                 "student_minus_baseline_exact_match": 0.03,
+                "student_numeric_parse_rate": 0.98,
                 "eval_duration_seconds": 500.0,
             },
             {
                 "candidate_id": "y",
                 "teacher_margin_pass": True,
                 "student_gain_pass": True,
+                "student_exact_gain_pass": True,
+                "student_numeric_parse_pass": True,
+                "eval_runtime_pass": True,
                 "integrity_pass": True,
                 "student_minus_baseline": 0.05,
                 "student_minus_baseline_exact_match": 0.02,
+                "student_numeric_parse_rate": 0.97,
                 "eval_duration_seconds": 400.0,
             },
             {
                 "candidate_id": "z",
                 "teacher_margin_pass": False,
                 "student_gain_pass": True,
+                "student_exact_gain_pass": True,
+                "student_numeric_parse_pass": True,
+                "eval_runtime_pass": True,
                 "integrity_pass": True,
                 "student_minus_baseline": 0.09,
                 "student_minus_baseline_exact_match": 0.06,
+                "student_numeric_parse_rate": 0.99,
                 "eval_duration_seconds": 300.0,
             },
         ],
