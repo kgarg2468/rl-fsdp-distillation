@@ -41,13 +41,28 @@ def test_real_canary_config_loads_successfully():
     assert cfg.evaluation.max_concurrency > 0
     assert cfg.evaluation.batch_size > 0
     assert cfg.evaluation.max_tokens_eval > 0
+    assert cfg.evaluation.eval_temperature == 0.0
+    assert cfg.evaluation.eval_max_tokens_candidates == (48, 96)
+    assert cfg.distillation.filter_profile == "moderate"
+    assert cfg.distillation.lora_rank == 8
     assert cfg.campaign.seeds == (17, 29, 43)
+    assert cfg.tuning.sweep_runs == 16
+    assert cfg.tuning.sweep_budget_fraction == 0.5
 
 
 def test_campaign_max_runs_cannot_exceed_seed_count(tmp_path: Path):
     cfg_path = tmp_path / "bad_campaign.toml"
     text = Path("config/default.toml").read_text()
     text = text.replace("max_runs = 3", "max_runs = 4")
+    cfg_path.write_text(text)
+    with pytest.raises(ValueError):
+        load_config(cfg_path)
+
+
+def test_invalid_tuning_fraction_rejected(tmp_path: Path):
+    cfg_path = tmp_path / "bad_tuning.toml"
+    text = Path("config/default.toml").read_text()
+    text = text.replace("sweep_budget_fraction = 0.5", "sweep_budget_fraction = 1.2")
     cfg_path.write_text(text)
     with pytest.raises(ValueError):
         load_config(cfg_path)

@@ -49,9 +49,27 @@ prompt_file = "src/inference_projects/fixtures/real_eval_prompts_150.jsonl"
 prompt_limit = 150
 max_concurrency = 6
 batch_size = 24
-max_tokens_eval = 24
+max_tokens_eval = 48
+eval_temperature = 0.0
+eval_stop_tokens = []
+eval_max_tokens_candidates = [48, 96]
 teacher_integrity_refusal_threshold = 0.30
 teacher_integrity_min_score = 0.10
+
+[distillation]
+teacher_prompt_template = "raw"
+filter_profile = "moderate"
+hard_example_ratio = 0.4
+kd_alpha = 0.5
+kd_temperature = 2.0
+learning_rate = 0.00002
+epochs = 2
+batch_size = 8
+warmup_ratio = 0.1
+lora_rank = 8
+context_length = 4096
+grad_clip = 1.0
+weight_decay = 0.0
 
 [campaign]
 seeds = [17, 29, 43]
@@ -59,3 +77,11 @@ min_runs = 2
 max_runs = 3
 bootstrap_reps = 5000
 early_stop_threshold = 0.03
+
+[tuning]
+stage1_prompt_limit = 30
+stage2_prompt_limit = 150
+sweep_runs = 16
+teacher_candidates = ["meta-llama/Llama-3.1-8B", "meta-llama/Llama-3.1-70B-Instruct"]
+promotion_top_k = 2
+sweep_budget_fraction = 0.5
