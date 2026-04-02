@@ -800,6 +800,7 @@ def run_tune(
                 "teacher_minus_baseline": -999.0,
                 "student_minus_baseline": -999.0,
                 "student_minus_baseline_exact_match": -999.0,
+                "student_numeric_parse_rate": -999.0,
                 "eval_duration_seconds": 0.0,
                 "actual_spend_usd": 0.0,
                 "integrity_status": "fail",
@@ -807,19 +808,38 @@ def run_tune(
                 "integrity_pass": False,
                 "teacher_margin_pass": False,
                 "student_gain_pass": False,
+                "student_exact_gain_pass": False,
+                "student_numeric_parse_pass": False,
+                "eval_runtime_pass": False,
+                "composite_pass": False,
             }
         teacher_score = _mean([float(row.get("teacher_score", 0.0)) for row in run_rows])
         baseline_score = _mean([float(row.get("baseline_score", 0.0)) for row in run_rows])
         student_score = _mean([float(row.get("student_score", 0.0)) for row in run_rows])
         student_minus_baseline = _mean([float(row.get("student_minus_baseline", 0.0)) for row in run_rows])
         student_minus_baseline_exact = _mean([float(row.get("student_minus_baseline_exact_match", 0.0)) for row in run_rows])
+        student_numeric_parse_rate = _mean([float(row.get("student_numeric_parse_rate", 1.0)) for row in run_rows])
         teacher_minus_baseline = _mean([float(row.get("teacher_minus_baseline", 0.0)) for row in run_rows])
         durations = [float(row.get("eval_duration_seconds", 0.0)) for row in run_rows]
         spends = [float(row.get("actual_spend_usd", 0.0)) for row in run_rows]
         integrity_passed = all(bool(row.get("integrity_pass", False)) for row in run_rows)
         checks = tuning_utils.candidate_acceptance(
-            metrics={"means": {"baseline": baseline_score, "teacher": teacher_score, "student": student_score}},
+            metrics={
+                "means": {
+                    "baseline": baseline_score,
+                    "teacher": teacher_score,
+                    "student": student_score,
+                    "student_minus_baseline_exact_match": student_minus_baseline_exact,
+                    "student_numeric_parse_rate": student_numeric_parse_rate,
+                },
+                "eval_duration_seconds": _mean(durations),
+            },
             integrity_passed=integrity_passed,
+            min_teacher_margin=cfg.tuning.min_teacher_margin,
+            min_student_gain=cfg.tuning.min_student_gain,
+            min_student_exact_gain=cfg.tuning.min_student_exact_gain,
+            min_student_numeric_parse=cfg.tuning.min_student_numeric_parse,
+            max_eval_duration_seconds=cfg.tuning.max_eval_duration_seconds,
         )
         return {
             **spec,
@@ -834,6 +854,7 @@ def run_tune(
             "student_minus_baseline": round(student_minus_baseline, 6),
             "student_minus_baseline_std": round(_std([float(row.get("student_minus_baseline", 0.0)) for row in run_rows]), 6),
             "student_minus_baseline_exact_match": round(student_minus_baseline_exact, 6),
+            "student_numeric_parse_rate": round(student_numeric_parse_rate, 6),
             "eval_duration_seconds": round(_mean(durations), 6),
             "actual_spend_usd": round(sum(spends), 6),
             "integrity_status": "pass" if integrity_passed else "fail",
@@ -841,6 +862,10 @@ def run_tune(
             "integrity_pass": checks["integrity_pass"],
             "teacher_margin_pass": checks["teacher_margin_pass"],
             "student_gain_pass": checks["student_gain_pass"],
+            "student_exact_gain_pass": checks["student_exact_gain_pass"],
+            "student_numeric_parse_pass": checks["student_numeric_parse_pass"],
+            "eval_runtime_pass": checks["eval_runtime_pass"],
+            "composite_pass": checks["composite_pass"],
             "artifacts": {"runs": [dict(row.get("artifacts", {})) for row in run_rows]},
         }
 
@@ -869,6 +894,8 @@ def run_tune(
             current_teacher=cfg.teacher_model,
             stronger_teacher=cfg.teacher_model,
             max_tokens_candidates=cfg.evaluation.eval_max_tokens_candidates,
+            teacher_candidates=cfg.tuning.teacher_candidates,
+            sweep_runs=cfg.tuning.sweep_runs,
         )
         for spec in teacher_specs:
             _assert_sweep_capacity()
@@ -911,6 +938,7 @@ def run_tune(
                             spec={**spec, "stage1_seed": seed, "stage1_slice": slice_index},
                             run_summary=run_summary,
                             phase="teacher_headroom",
+                            tuning_cfg=cfg.tuning,
                         )
                     )
                 if candidate_error:
@@ -929,6 +957,7 @@ def run_tune(
                     "teacher_minus_baseline": -999.0,
                     "student_minus_baseline": -999.0,
                     "student_minus_baseline_exact_match": -999.0,
+                    "student_numeric_parse_rate": -999.0,
                     "eval_duration_seconds": 0.0,
                     "actual_spend_usd": 0.0,
                     "integrity_status": "fail",
@@ -936,6 +965,10 @@ def run_tune(
                     "integrity_pass": False,
                     "teacher_margin_pass": False,
                     "student_gain_pass": False,
+                    "student_exact_gain_pass": False,
+                    "student_numeric_parse_pass": False,
+                    "eval_runtime_pass": False,
+                    "composite_pass": False,
                 }
             else:
                 row = _aggregate_candidate_row(spec=spec, run_rows=run_rows, phase="teacher_headroom")
@@ -950,7 +983,10 @@ def run_tune(
             stop_reason = "No teacher candidate passed integrity checks in phase-1 sweep."
 
         if status == "ok" and teacher_winner is not None:
-            for spec in tuning_utils.distill_l8_candidates():
+            distill_specs = tuning_utils.distill_l8_candidates()
+            if cfg.tuning.sweep_runs > 0:
+                distill_specs = distill_specs[: cfg.tuning.sweep_runs]
+            for spec in distill_specs:
                 _assert_sweep_capacity()
                 sweep_invocations += 1
                 candidate_id = str(spec["candidate_id"])
@@ -994,6 +1030,7 @@ def run_tune(
                                 spec={**spec, "stage1_seed": seed, "stage1_slice": slice_index},
                                 run_summary=run_summary,
                                 phase="distill_tuning",
+                                tuning_cfg=cfg.tuning,
                             )
                         )
                 merged = {
@@ -1049,7 +1086,12 @@ def run_tune(
                     last_completed_stage = str(run_summary["stages_completed"][-1])
                 confirm_spend_usd = round(confirm_spend_usd + float(result["new_spend_usd"]), 4)
                 project_new_spend_usd = round(project_new_spend_usd + float(result["new_spend_usd"]), 4)
-                row = _build_tune_candidate_row(spec=promoted, run_summary=run_summary, phase="confirm")
+                row = _build_tune_candidate_row(
+                    spec=promoted,
+                    run_summary=run_summary,
+                    phase="confirm",
+                    tuning_cfg=cfg.tuning,
+                )
                 candidate_rows.append(row)
                 confirmation_rows.append(row)
                 _emit_log("run_done", command="tune", run=candidate_id, phase="confirm", integrity=row.get("integrity_pass", False))
@@ -1115,10 +1157,15 @@ def run_tune(
         )
 
     acceptance_checks = {
-        "teacher_margin_winner_pass": bool(winner_row and float(winner_row.get("teacher_minus_baseline", 0.0)) >= 0.05),
-        "student_gain_winner_pass": bool(winner_row and float(winner_row.get("student_minus_baseline", 0.0)) >= 0.03),
+        "teacher_margin_winner_pass": bool(winner_row and bool(winner_row.get("teacher_margin_pass", False))),
+        "student_gain_winner_pass": bool(winner_row and bool(winner_row.get("student_gain_pass", False))),
+        "student_exact_gain_winner_pass": bool(winner_row and bool(winner_row.get("student_exact_gain_pass", False))),
+        "student_numeric_parse_winner_pass": bool(
+            winner_row and bool(winner_row.get("student_numeric_parse_pass", False))
+        ),
         "integrity_winner_pass": bool(winner_row and bool(winner_row.get("integrity_pass", False))),
-        "eval_runtime_winner_pass": bool(winner_row and float(winner_row.get("eval_duration_seconds", 0.0)) < 720.0),
+        "eval_runtime_winner_pass": bool(winner_row and bool(winner_row.get("eval_runtime_pass", False))),
+        "composite_winner_pass": bool(winner_row and bool(winner_row.get("composite_pass", False))),
     }
     candidates_path.parent.mkdir(parents=True, exist_ok=True)
     candidates_path.write_text("\n".join(json.dumps(row) for row in candidate_rows) + ("\n" if candidate_rows else ""))
@@ -1193,15 +1240,33 @@ def _build_tune_candidate_row(
     spec: dict[str, Any],
     run_summary: dict[str, Any],
     phase: str,
+    tuning_cfg: Any,
 ) -> dict[str, Any]:
     metrics = run_summary.get("metrics", {})
     means = metrics.get("means", {}) if isinstance(metrics, dict) else {}
     teacher_minus_baseline = float(means.get("teacher", 0.0)) - float(means.get("baseline", 0.0))
     student_minus_baseline = float(means.get("student", 0.0)) - float(means.get("baseline", 0.0))
     student_minus_baseline_exact = float(means.get("student_minus_baseline_exact_match", 0.0))
+    student_numeric_parse_rate = float(means.get("student_numeric_parse_rate", 1.0))
+    eval_duration_seconds = float(run_summary.get("stage_durations_seconds", {}).get("eval", 0.0))
     integrity = run_summary.get("integrity", {})
     integrity_passed = bool(integrity.get("passed", False))
-    checks = tuning_utils.candidate_acceptance(metrics=metrics, integrity_passed=integrity_passed)
+    checks = tuning_utils.candidate_acceptance(
+        metrics={
+            "means": {
+                **means,
+                "student_minus_baseline_exact_match": student_minus_baseline_exact,
+                "student_numeric_parse_rate": student_numeric_parse_rate,
+            },
+            "eval_duration_seconds": eval_duration_seconds,
+        },
+        integrity_passed=integrity_passed,
+        min_teacher_margin=float(tuning_cfg.min_teacher_margin),
+        min_student_gain=float(tuning_cfg.min_student_gain),
+        min_student_exact_gain=float(tuning_cfg.min_student_exact_gain),
+        min_student_numeric_parse=float(tuning_cfg.min_student_numeric_parse),
+        max_eval_duration_seconds=float(tuning_cfg.max_eval_duration_seconds),
+    )
     row: dict[str, Any] = {
         **spec,
         "phase": phase,
@@ -1213,13 +1278,18 @@ def _build_tune_candidate_row(
         "teacher_minus_baseline": round(teacher_minus_baseline, 6),
         "student_minus_baseline": round(student_minus_baseline, 6),
         "student_minus_baseline_exact_match": round(student_minus_baseline_exact, 6),
-        "eval_duration_seconds": float(run_summary.get("stage_durations_seconds", {}).get("eval", 0.0)),
+        "student_numeric_parse_rate": round(student_numeric_parse_rate, 6),
+        "eval_duration_seconds": eval_duration_seconds,
         "actual_spend_usd": float(run_summary.get("actual_spend_usd", 0.0)),
         "integrity_status": str(integrity.get("status", "")),
         "integrity_reason": str(integrity.get("reason", "")),
         "integrity_pass": checks["integrity_pass"],
         "teacher_margin_pass": checks["teacher_margin_pass"],
         "student_gain_pass": checks["student_gain_pass"],
+        "student_exact_gain_pass": checks["student_exact_gain_pass"],
+        "student_numeric_parse_pass": checks["student_numeric_parse_pass"],
+        "eval_runtime_pass": checks["eval_runtime_pass"],
+        "composite_pass": checks["composite_pass"],
         "artifacts": dict(run_summary.get("artifacts", {})),
     }
     return row
@@ -1257,6 +1327,7 @@ def _run_tune_candidate(
         ),
         distillation=replace(
             cfg.distillation,
+            training_prompt_file=prompt_file,
             teacher_prompt_template=teacher_prompt_template,
             **distill_overrides,
         ),
