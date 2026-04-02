@@ -17,8 +17,6 @@
 - LLM judge win rate (student vs teacher): 0.44
 
 ## Cost
-- Tinker target cap (USD): 25.00
-- Tinker hard cap (USD): 30.00
 - Projected spend (USD): 20.24
 - Actual spend (USD): 19.03
 - Teacher inference cost / 1k tokens (USD): 0.00027
