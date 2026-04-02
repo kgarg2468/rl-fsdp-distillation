@@ -3,9 +3,11 @@ from inference_projects.tinker_runtime import (
     CANARY_FIXTURE_PATH,
     _cost_per_1k,
     _exact_numeric_match,
+    _make_training_datum,
     _is_refusal_like,
     _model_health,
     _numeric_parse_rate,
+    _run_training_loop,
     _sampling_model_path_candidates,
     continue_from_checkpoint,
     create_lora_checkpoint,
@@ -148,3 +150,65 @@ def test_continue_from_checkpoint_uses_sampler_weights_save(monkeypatch):
     assert checkpoint.sampler_checkpoint_path == "tinker://x/sampler_weights/z"
     assert [entry["callable_name"] for entry in captured] == ["save_state", "save_weights_for_sampler"]
     assert [entry["wait_for_checkpoint"] for entry in captured] == [True, False]
+
+
+def test_make_training_datum_falls_back_for_empty_tokens():
+    class EmptyTokenizer:
+        eos_token_id = 7
+
+        def encode(self, text):
+            _ = text
+            return []
+
+    datum, target_tokens = _make_training_datum(tokenizer=EmptyTokenizer(), prompt="", target="")
+    assert target_tokens == 1
+    assert datum.model_input.chunks[0].tokens == [7]
+    assert datum.loss_fn_inputs["target_tokens"].data == [7]
+
+
+def test_run_training_loop_tracks_steps_and_losses():
+    class FakeTokenizer:
+        def encode(self, text):
+            return [len(text), 1]
+
+    class FakeFuture:
+        def __init__(self, value):
+            self._value = value
+
+        def result(self):
+            return self._value
+
+    class FakeTrainClient:
+        def __init__(self):
+            self.learning_rates = []
+
+        def get_tokenizer(self):
+            return FakeTokenizer()
+
+        def forward_backward(self, batch, loss_fn):
+            _ = (batch, loss_fn)
+            return FakeFuture(type("FwdBwd", (), {"metrics": {"loss": 0.25}, "loss_fn_outputs": []})())
+
+        def optim_step(self, adam_params):
+            self.learning_rates.append(adam_params.learning_rate)
+            return FakeFuture(type("Optim", (), {"metrics": {}})())
+
+    client = FakeTrainClient()
+    summary = _run_training_loop(
+        train_client=client,
+        examples=[("p1", "t1"), ("p2", "t2"), ("p3", "t3")],
+        epochs=2,
+        batch_size=2,
+        learning_rate=2e-5,
+        warmup_ratio=0.5,
+        weight_decay=0.01,
+        grad_clip_norm=1.0,
+        max_consecutive_failures=3,
+        stage="distill",
+    )
+
+    assert summary["steps"] == 4
+    assert summary["batches_per_epoch"] == 2
+    assert len(summary["loss_trace"]) == 4
+    assert client.learning_rates[0] < 2e-5
+    assert client.learning_rates[-1] == 2e-5

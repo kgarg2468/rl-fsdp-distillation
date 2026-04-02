@@ -3,12 +3,13 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 import re
 import time
 from typing import Any
 
-from tinker import ModelInput, SamplingParams, ServiceClient
+from tinker import AdamParams, Datum, ModelInput, SamplingParams, ServiceClient, TensorData
 from tinker.lib.retry_handler import RetryConfig
 
 from inference_projects.config import ProjectConfig
@@ -493,6 +494,137 @@ def _usage_dict(
         "cost_usd": cost,
         "provider_raw": provider_raw,
         "run_id": run_id,
+    }
+
+
+def _safe_token_ids(tokenizer: Any, text: str) -> list[int]:
+    token_ids = list(tokenizer.encode(text))
+    if token_ids:
+        return token_ids
+    eos_id = getattr(tokenizer, "eos_token_id", None)
+    if isinstance(eos_id, int):
+        return [eos_id]
+    return [0]
+
+
+def _make_training_datum(*, tokenizer: Any, prompt: str, target: str) -> tuple[Datum, int]:
+    input_ids = _safe_token_ids(tokenizer, prompt)
+    target_ids = _safe_token_ids(tokenizer, target)
+    datum = Datum(
+        model_input=ModelInput.from_ints(input_ids),
+        loss_fn_inputs={
+            "target_tokens": TensorData(
+                data=target_ids,
+                dtype="int64",
+                shape=[len(target_ids)],
+            )
+        },
+    )
+    return datum, len(target_ids)
+
+
+def _extract_loss_metric(forward_backward_result: Any) -> float | None:
+    metrics = getattr(forward_backward_result, "metrics", None)
+    if isinstance(metrics, dict):
+        for key in ("loss", "cross_entropy", "mean_loss"):
+            value = metrics.get(key)
+            if isinstance(value, (int, float)):
+                return float(value)
+    loss_outputs = getattr(forward_backward_result, "loss_fn_outputs", None)
+    if isinstance(loss_outputs, list):
+        for entry in loss_outputs:
+            if isinstance(entry, dict):
+                for candidate in entry.values():
+                    data = getattr(candidate, "data", None)
+                    if isinstance(data, list) and data and isinstance(data[0], (int, float)):
+                        return float(data[0])
+    return None
+
+
+def _run_training_loop(
+    *,
+    train_client: Any,
+    examples: list[tuple[str, str]],
+    epochs: int,
+    batch_size: int,
+    learning_rate: float,
+    warmup_ratio: float,
+    weight_decay: float,
+    grad_clip_norm: float,
+    max_consecutive_failures: int,
+    stage: str,
+) -> dict[str, object]:
+    if epochs <= 0:
+        raise ValueError("epochs must be > 0")
+    if batch_size <= 0:
+        raise ValueError("batch_size must be > 0")
+    if max_consecutive_failures <= 0:
+        raise ValueError("max_consecutive_failures must be > 0")
+    if not examples:
+        return {
+            "steps": 0,
+            "nan_events": 0,
+            "loss_trace": [],
+            "train_tokens": 0,
+            "batches_per_epoch": 0,
+        }
+
+    tokenizer = train_client.get_tokenizer()
+    datums: list[Datum] = []
+    train_tokens = 0
+    for prompt, target in examples:
+        datum, target_tokens = _make_training_datum(tokenizer=tokenizer, prompt=prompt, target=target)
+        datums.append(datum)
+        train_tokens += target_tokens
+
+    batches: list[list[Datum]] = [datums[i : i + batch_size] for i in range(0, len(datums), batch_size)]
+    total_steps = epochs * len(batches)
+    warmup_steps = int(total_steps * warmup_ratio)
+    if warmup_ratio > 0 and warmup_steps <= 0:
+        warmup_steps = 1
+
+    loss_trace: list[float] = []
+    nan_events = 0
+    consecutive_failures = 0
+    global_step = 0
+
+    for _epoch in range(epochs):
+        for batch in batches:
+            try:
+                fwdbwd_result = train_client.forward_backward(batch, "cross_entropy").result()
+                loss_value = _extract_loss_metric(fwdbwd_result)
+                if loss_value is not None:
+                    if math.isnan(loss_value) or math.isinf(loss_value):
+                        nan_events += 1
+                    else:
+                        loss_trace.append(round(loss_value, 6))
+                global_step += 1
+                if warmup_steps > 0 and global_step <= warmup_steps:
+                    step_lr = learning_rate * (global_step / warmup_steps)
+                else:
+                    step_lr = learning_rate
+                train_client.optim_step(
+                    AdamParams(
+                        learning_rate=max(step_lr, 1e-8),
+                        weight_decay=weight_decay,
+                        grad_clip_norm=grad_clip_norm,
+                    )
+                ).result()
+                consecutive_failures = 0
+            except Exception as exc:
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    raise RuntimeError(
+                        f"Training aborted after {consecutive_failures} consecutive failures "
+                        f"during stage '{stage}': {exc}"
+                    ) from exc
+
+    return {
+        "steps": global_step,
+        "nan_events": nan_events,
+        "loss_trace": loss_trace,
+        "train_tokens": train_tokens * epochs,
+        "batches_per_epoch": len(batches),
     }
 
 
