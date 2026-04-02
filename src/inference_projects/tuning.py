@@ -64,6 +64,47 @@ def freeze_prompt_slice(*, source_path: Path, frozen_path: Path, prompt_limit: i
     )
 
 
+def freeze_prompt_slices(
+    *,
+    source_path: Path,
+    output_dir: Path,
+    slice_size: int,
+    num_slices: int,
+) -> list[FrozenPromptSlice]:
+    if slice_size <= 0:
+        raise ValueError("slice_size must be > 0")
+    if num_slices <= 0:
+        raise ValueError("num_slices must be > 0")
+    rows = _load_jsonl_rows(source_path)
+    required = slice_size * num_slices
+    if len(rows) < required:
+        raise RuntimeError(f"Need at least {required} rows for {num_slices} slices of size {slice_size}: {source_path}")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    slices: list[FrozenPromptSlice] = []
+    for idx in range(num_slices):
+        start = idx * slice_size
+        end = start + slice_size
+        frozen_path = output_dir / f"slice_{idx + 1:02d}.jsonl"
+        frozen_path.write_text("\n".join(json.dumps(row) for row in rows[start:end]) + "\n")
+        prompt_ids = [str(row.get("id", "")).strip() for row in rows[start:end]]
+        if any(not row_id for row_id in prompt_ids):
+            raise RuntimeError(f"Prompt slice {idx + 1} has empty row ids: {source_path}")
+        if len(set(prompt_ids)) != len(prompt_ids):
+            raise RuntimeError(f"Prompt slice {idx + 1} has duplicate row ids: {source_path}")
+        slices.append(
+            FrozenPromptSlice(
+                source_path=str(source_path),
+                frozen_path=str(frozen_path),
+                sha256=_sha256_file(frozen_path),
+                rows=slice_size,
+                prompt_limit=slice_size,
+                prompt_ids=prompt_ids,
+            )
+        )
+    return slices
+
+
 def teacher_headroom_candidates(
     *,
     current_teacher: str,

@@ -435,16 +435,18 @@ def run_tune(
     state_dir: Path,
 ) -> dict[str, object]:
     tuning_dir = state_dir / "tuning"
-    stage1_frozen = tuning_utils.freeze_prompt_slice(
-        source_path=cfg.evaluation.prompt_file,
-        frozen_path=tuning_dir / "frozen_prompts_stage1.jsonl",
-        prompt_limit=cfg.tuning.stage1_prompt_limit,
-    )
     stage2_frozen = tuning_utils.freeze_prompt_slice(
         source_path=cfg.evaluation.prompt_file,
         frozen_path=tuning_dir / "frozen_prompts_stage2.jsonl",
         prompt_limit=cfg.tuning.stage2_prompt_limit,
     )
+    stage1_slices = tuning_utils.freeze_prompt_slices(
+        source_path=Path(stage2_frozen.frozen_path),
+        output_dir=tuning_dir / "frozen_stage1_slices",
+        slice_size=cfg.tuning.stage1_prompt_limit,
+        num_slices=3,
+    )
+    stage1_seeds = tuple(cfg.campaign.seeds[:2]) or (cfg.seed,)
 
     sweep_spend_usd = 0.0
     confirm_spend_usd = 0.0
@@ -460,7 +462,86 @@ def run_tune(
     final_campaign_summary: dict[str, Any] | None = None
     final_campaign_info: dict[str, object] = {"executed": False}
 
-    stronger_teacher = next((name for name in cfg.tuning.teacher_candidates if name != cfg.teacher_model), cfg.teacher_model)
+    def _mean(values: list[float]) -> float:
+        if not values:
+            return 0.0
+        return sum(values) / len(values)
+
+    def _std(values: list[float]) -> float:
+        if len(values) <= 1:
+            return 0.0
+        mean_val = _mean(values)
+        variance = sum((value - mean_val) ** 2 for value in values) / len(values)
+        return variance**0.5
+
+    def _aggregate_candidate_row(
+        *,
+        spec: dict[str, Any],
+        run_rows: list[dict[str, Any]],
+        phase: str,
+    ) -> dict[str, Any]:
+        if not run_rows:
+            return {
+                **spec,
+                "phase": phase,
+                "status": "no_runs",
+                "aggregation_runs": 0,
+                "teacher_score": -999.0,
+                "baseline_score": -999.0,
+                "student_score": -999.0,
+                "teacher_minus_baseline": -999.0,
+                "student_minus_baseline": -999.0,
+                "student_minus_baseline_exact_match": -999.0,
+                "eval_duration_seconds": 0.0,
+                "actual_spend_usd": 0.0,
+                "integrity_status": "fail",
+                "integrity_reason": "No stage1 runs executed",
+                "integrity_pass": False,
+                "teacher_margin_pass": False,
+                "student_gain_pass": False,
+            }
+
+        teacher_score = _mean([float(row.get("teacher_score", 0.0)) for row in run_rows])
+        baseline_score = _mean([float(row.get("baseline_score", 0.0)) for row in run_rows])
+        student_score = _mean([float(row.get("student_score", 0.0)) for row in run_rows])
+        student_minus_baseline = _mean([float(row.get("student_minus_baseline", 0.0)) for row in run_rows])
+        student_minus_baseline_exact = _mean(
+            [float(row.get("student_minus_baseline_exact_match", 0.0)) for row in run_rows]
+        )
+        teacher_minus_baseline = _mean([float(row.get("teacher_minus_baseline", 0.0)) for row in run_rows])
+        durations = [float(row.get("eval_duration_seconds", 0.0)) for row in run_rows]
+        spends = [float(row.get("actual_spend_usd", 0.0)) for row in run_rows]
+        integrity_passed = all(bool(row.get("integrity_pass", False)) for row in run_rows)
+        checks = tuning_utils.candidate_acceptance(
+            metrics={"means": {"baseline": baseline_score, "teacher": teacher_score, "student": student_score}},
+            integrity_passed=integrity_passed,
+        )
+        return {
+            **spec,
+            "phase": phase,
+            "aggregation_runs": len(run_rows),
+            "stage1_seeds": list(stage1_seeds),
+            "stage1_slices": [slice_info.frozen_path for slice_info in stage1_slices],
+            "teacher_score": round(teacher_score, 6),
+            "baseline_score": round(baseline_score, 6),
+            "student_score": round(student_score, 6),
+            "teacher_minus_baseline": round(teacher_minus_baseline, 6),
+            "student_minus_baseline": round(student_minus_baseline, 6),
+            "student_minus_baseline_std": round(
+                _std([float(row.get("student_minus_baseline", 0.0)) for row in run_rows]), 6
+            ),
+            "student_minus_baseline_exact_match": round(student_minus_baseline_exact, 6),
+            "eval_duration_seconds": round(_mean(durations), 6),
+            "actual_spend_usd": round(sum(spends), 6),
+            "integrity_status": "pass" if integrity_passed else "fail",
+            "integrity_reason": "",
+            "integrity_pass": checks["integrity_pass"],
+            "teacher_margin_pass": checks["teacher_margin_pass"],
+            "student_gain_pass": checks["student_gain_pass"],
+            "artifacts": {"runs": [dict(row.get("artifacts", {})) for row in run_rows]},
+        }
+
+    stronger_teacher = cfg.teacher_model
     teacher_specs = tuning_utils.teacher_headroom_candidates(
         current_teacher=cfg.teacher_model,
         stronger_teacher=stronger_teacher,
@@ -469,51 +550,72 @@ def run_tune(
 
     for spec in teacher_specs:
         candidate_id = str(spec["candidate_id"])
-        run_dir = tuning_dir / "sweeps" / "teacher" / candidate_id
-        try:
-            result = _run_tune_candidate(
-                cfg=cfg,
-                mode=mode,
-                run_dir=run_dir,
-                prompt_file=Path(stage1_frozen.frozen_path),
-                prompt_limit=cfg.tuning.stage1_prompt_limit,
-                teacher_model=str(spec["teacher_model"]),
-                max_tokens_eval=int(spec["max_tokens_eval"]),
-                eval_temperature=float(spec["eval_temperature"]),
-                teacher_prompt_template=str(spec["teacher_prompt_template"]),
-                distill_overrides={},
-            )
-            fallback_error = ""
-            fallback_teacher_model = ""
-        except Exception as exc:
-            if str(spec["teacher_model"]) == cfg.teacher_model:
-                raise
-            fallback_error = str(exc)
-            fallback_teacher_model = cfg.teacher_model
-            fallback_spec = dict(spec)
-            fallback_spec["teacher_model"] = cfg.teacher_model
-            result = _run_tune_candidate(
-                cfg=cfg,
-                mode=mode,
-                run_dir=run_dir,
-                prompt_file=Path(stage1_frozen.frozen_path),
-                prompt_limit=cfg.tuning.stage1_prompt_limit,
-                teacher_model=str(fallback_spec["teacher_model"]),
-                max_tokens_eval=int(fallback_spec["max_tokens_eval"]),
-                eval_temperature=float(fallback_spec["eval_temperature"]),
-                teacher_prompt_template=str(fallback_spec["teacher_prompt_template"]),
-                distill_overrides={},
-            )
-            spec = fallback_spec
+        run_rows: list[dict[str, Any]] = []
+        candidate_error = ""
+        for seed in stage1_seeds:
+            for slice_index, slice_info in enumerate(stage1_slices, start=1):
+                run_dir = (
+                    tuning_dir
+                    / "sweeps"
+                    / "teacher"
+                    / candidate_id
+                    / f"seed-{seed}"
+                    / f"slice-{slice_index:02d}"
+                )
+                try:
+                    result = _run_tune_candidate(
+                        cfg=cfg,
+                        mode=mode,
+                        run_dir=run_dir,
+                        seed=seed,
+                        prompt_file=Path(slice_info.frozen_path),
+                        prompt_limit=cfg.tuning.stage1_prompt_limit,
+                        teacher_model=str(spec["teacher_model"]),
+                        max_tokens_eval=int(spec["max_tokens_eval"]),
+                        eval_temperature=float(spec["eval_temperature"]),
+                        teacher_prompt_template=str(spec["teacher_prompt_template"]),
+                        distill_overrides={},
+                    )
+                except Exception as exc:
+                    candidate_error = str(exc)
+                    break
+                run_summary = result["run_summary"]
+                sweep_spend_usd = round(sweep_spend_usd + float(result["new_spend_usd"]), 4)
+                project_new_spend_usd = round(project_new_spend_usd + float(result["new_spend_usd"]), 4)
+                run_rows.append(
+                    _build_tune_candidate_row(
+                        spec={**spec, "stage1_seed": seed, "stage1_slice": slice_index},
+                        run_summary=run_summary,
+                        phase="teacher_headroom",
+                    )
+                )
+            if candidate_error:
+                break
 
-        run_summary = result["run_summary"]
-        sweep_spend_usd = round(sweep_spend_usd + float(result["new_spend_usd"]), 4)
-        project_new_spend_usd = round(project_new_spend_usd + float(result["new_spend_usd"]), 4)
-
-        row = _build_tune_candidate_row(spec=spec, run_summary=run_summary, phase="teacher_headroom")
-        if fallback_teacher_model:
-            row["fallback_teacher_model"] = fallback_teacher_model
-            row["fallback_error"] = fallback_error
+        if candidate_error:
+            row = {
+                **spec,
+                "phase": "teacher_headroom",
+                "status": "teacher_unavailable",
+                "teacher_unavailable": True,
+                "error": candidate_error,
+                "aggregation_runs": len(run_rows),
+                "teacher_score": -999.0,
+                "baseline_score": -999.0,
+                "student_score": -999.0,
+                "teacher_minus_baseline": -999.0,
+                "student_minus_baseline": -999.0,
+                "student_minus_baseline_exact_match": -999.0,
+                "eval_duration_seconds": 0.0,
+                "actual_spend_usd": 0.0,
+                "integrity_status": "fail",
+                "integrity_reason": candidate_error,
+                "integrity_pass": False,
+                "teacher_margin_pass": False,
+                "student_gain_pass": False,
+            }
+        else:
+            row = _aggregate_candidate_row(spec=spec, run_rows=run_rows, phase="teacher_headroom")
         candidate_rows.append(row)
         teacher_rows.append(row)
 
@@ -526,30 +628,48 @@ def run_tune(
     if status == "ok" and teacher_winner is not None:
         for spec in tuning_utils.distill_l8_candidates():
             candidate_id = str(spec["candidate_id"])
-            run_dir = tuning_dir / "sweeps" / "distill" / candidate_id
-            result = _run_tune_candidate(
-                cfg=cfg,
-                mode=mode,
-                run_dir=run_dir,
-                prompt_file=Path(stage1_frozen.frozen_path),
-                prompt_limit=cfg.tuning.stage1_prompt_limit,
-                teacher_model=str(teacher_winner["teacher_model"]),
-                max_tokens_eval=int(teacher_winner["max_tokens_eval"]),
-                eval_temperature=float(teacher_winner["eval_temperature"]),
-                teacher_prompt_template=str(teacher_winner["teacher_prompt_template"]),
-                distill_overrides={
-                    "filter_profile": str(spec["filter_profile"]),
-                    "hard_example_ratio": float(spec["hard_example_ratio"]),
-                    "kd_alpha": float(spec["kd_alpha"]),
-                    "kd_temperature": float(spec["kd_temperature"]),
-                    "learning_rate": float(spec["learning_rate"]),
-                    "epochs": int(spec["epochs"]),
-                    "lora_rank": int(spec["lora_rank"]),
-                },
-            )
-            run_summary = result["run_summary"]
-            sweep_spend_usd = round(sweep_spend_usd + float(result["new_spend_usd"]), 4)
-            project_new_spend_usd = round(project_new_spend_usd + float(result["new_spend_usd"]), 4)
+            run_rows: list[dict[str, Any]] = []
+            for seed in stage1_seeds:
+                for slice_index, slice_info in enumerate(stage1_slices, start=1):
+                    run_dir = (
+                        tuning_dir
+                        / "sweeps"
+                        / "distill"
+                        / candidate_id
+                        / f"seed-{seed}"
+                        / f"slice-{slice_index:02d}"
+                    )
+                    result = _run_tune_candidate(
+                        cfg=cfg,
+                        mode=mode,
+                        run_dir=run_dir,
+                        seed=seed,
+                        prompt_file=Path(slice_info.frozen_path),
+                        prompt_limit=cfg.tuning.stage1_prompt_limit,
+                        teacher_model=str(teacher_winner["teacher_model"]),
+                        max_tokens_eval=int(teacher_winner["max_tokens_eval"]),
+                        eval_temperature=float(teacher_winner["eval_temperature"]),
+                        teacher_prompt_template=str(teacher_winner["teacher_prompt_template"]),
+                        distill_overrides={
+                            "filter_profile": str(spec["filter_profile"]),
+                            "hard_example_ratio": float(spec["hard_example_ratio"]),
+                            "kd_alpha": float(spec["kd_alpha"]),
+                            "kd_temperature": float(spec["kd_temperature"]),
+                            "learning_rate": float(spec["learning_rate"]),
+                            "epochs": int(spec["epochs"]),
+                            "lora_rank": int(spec["lora_rank"]),
+                        },
+                    )
+                    run_summary = result["run_summary"]
+                    sweep_spend_usd = round(sweep_spend_usd + float(result["new_spend_usd"]), 4)
+                    project_new_spend_usd = round(project_new_spend_usd + float(result["new_spend_usd"]), 4)
+                    run_rows.append(
+                        _build_tune_candidate_row(
+                            spec={**spec, "stage1_seed": seed, "stage1_slice": slice_index},
+                            run_summary=run_summary,
+                            phase="distill_tuning",
+                        )
+                    )
 
             merged = {
                 **spec,
@@ -558,7 +678,7 @@ def run_tune(
                 "eval_temperature": teacher_winner["eval_temperature"],
                 "max_tokens_eval": teacher_winner["max_tokens_eval"],
             }
-            row = _build_tune_candidate_row(spec=merged, run_summary=run_summary, phase="distill_tuning")
+            row = _aggregate_candidate_row(spec=merged, run_rows=run_rows, phase="distill_tuning")
             candidate_rows.append(row)
             distill_rows.append(row)
 
@@ -575,6 +695,7 @@ def run_tune(
                 cfg=cfg,
                 mode=mode,
                 run_dir=run_dir,
+                seed=cfg.campaign.seeds[0],
                 prompt_file=Path(stage2_frozen.frozen_path),
                 prompt_limit=cfg.tuning.stage2_prompt_limit,
                 teacher_model=str(promoted["teacher_model"]),
@@ -671,7 +792,7 @@ def run_tune(
         "status": status,
         "stop_reason": stop_reason,
         "frozen_prompts": {
-            "stage1": stage1_frozen.as_dict(),
+            "stage1_slices": [slice_info.as_dict() for slice_info in stage1_slices],
             "stage2": stage2_frozen.as_dict(),
         },
         "teacher_sweep": {
@@ -757,6 +878,7 @@ def _run_tune_candidate(
     cfg: ProjectConfig,
     mode: str,
     run_dir: Path,
+    seed: int,
     prompt_file: Path,
     prompt_limit: int,
     teacher_model: str,
@@ -768,7 +890,7 @@ def _run_tune_candidate(
     run_paths = PipelinePaths(run_dir)
     run_cfg = replace(
         cfg,
-        seed=cfg.campaign.seeds[0],
+        seed=seed,
         teacher_model=teacher_model,
         evaluation=replace(
             cfg.evaluation,

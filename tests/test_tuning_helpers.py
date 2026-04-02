@@ -4,6 +4,7 @@ from inference_projects.tuning import (
     candidate_acceptance,
     distill_l8_candidates,
     freeze_prompt_slice,
+    freeze_prompt_slices,
     promote_candidates,
     rank_teacher_candidates,
     teacher_headroom_candidates,
@@ -108,3 +109,13 @@ def test_freeze_prompt_slice_writes_limited_rows(tmp_path: Path):
     assert len(frozen.prompt_ids) == 30
     assert frozen.prompt_ids[0] == "p001"
     assert frozen.prompt_ids[-1] == "p030"
+
+
+def test_freeze_prompt_slices_writes_disjoint_chunks(tmp_path: Path):
+    source = Path("src/inference_projects/fixtures/real_eval_prompts_150.jsonl")
+    output_dir = tmp_path / "slices"
+    slices = freeze_prompt_slices(source_path=source, output_dir=output_dir, slice_size=30, num_slices=3)
+    assert len(slices) == 3
+    assert slices[0].prompt_ids[0] == "p001"
+    assert slices[1].prompt_ids[0] == "p031"
+    assert slices[2].prompt_ids[0] == "p061"

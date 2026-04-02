@@ -217,6 +217,7 @@ def test_tune_real_mode_generates_summary_and_candidates(tmp_path: Path, monkeyp
     assert candidates.exists()
 
     first_candidate = json.loads(candidates.read_text().splitlines()[0])
+    assert first_candidate["aggregation_runs"] == 6
     assert "teacher_margin_pass" in first_candidate
     assert "student_gain_pass" in first_candidate
     assert "integrity_pass" in first_candidate
