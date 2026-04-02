@@ -38,3 +38,22 @@ def test_cli_supports_tune_command():
     args = parser.parse_args(["tune", "--mode", "mock", "--state-dir", "/tmp/state"])
     assert args.command == "tune"
     assert args.mode == "mock"
+
+
+def test_cli_parses_reliability_flags():
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "campaign",
+            "--state-dir",
+            "/tmp/state",
+            "--no-resume",
+            "--heartbeat-seconds",
+            "12",
+            "--progress-timeout-seconds",
+            "99",
+        ]
+    )
+    assert args.resume is False
+    assert args.heartbeat_seconds == 12
+    assert args.progress_timeout_seconds == 99.0
