@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from inference_projects.config import ProjectConfig
-from inference_projects.tinker_runtime import REAL_USAGE_KEY, run_real_distill, run_real_eval, run_real_fsdp, run_real_rl
+from inference_projects.tinker_runtime import REAL_USAGE_KEY, run_real_distill, run_real_eval, run_real_teacher_ft, run_real_rl
 
 
 class RLStageAdapter(Protocol):
@@ -14,7 +14,7 @@ class RLStageAdapter(Protocol):
         ...
 
 
-class FSDPStageAdapter(Protocol):
+class TeacherFTStageAdapter(Protocol):
     mode: str
 
     def run(
@@ -57,7 +57,7 @@ class EvalStageAdapter(Protocol):
 @dataclass(frozen=True)
 class StageAdapters:
     rl: RLStageAdapter
-    fsdp: FSDPStageAdapter
+    teacher_ft: TeacherFTStageAdapter
     distill: DistillStageAdapter
     eval: EvalStageAdapter
 
@@ -78,7 +78,7 @@ class MockRLAdapter:
 
 
 @dataclass(frozen=True)
-class MockFSDPAdapter:
+class MockTeacherFTAdapter:
     mode: str = "mock"
 
     def run(
@@ -91,12 +91,12 @@ class MockFSDPAdapter:
         updated = dict(teacher_payload)
         updated.update(
             {
-                "stage": "fsdp",
+                "stage": "teacher_ft",
                 "quality_score": 0.74,
                 "stability_score": 0.89,
-                "axolotl_fsdp": True,
-                "fsdp_cost_usd": actual_cost_usd,
-                "notes": "Mock Axolotl FSDP fine-tuning completed.",
+                "axolotl_teacher_ft": True,
+                "teacher_ft_cost_usd": actual_cost_usd,
+                "notes": "Mock Axolotl Teacher FT fine-tuning completed.",
             }
         )
         return updated
@@ -167,7 +167,7 @@ class MockEvalAdapter:
             },
             "training_stability": {
                 "rl": {"stability_score": 0.91, "nan_events": 0},
-                "fsdp": {"stability_score": 0.89, "nan_events": 0},
+                "teacher_ft": {"stability_score": 0.89, "nan_events": 0},
                 "distill": {"stability_score": 0.90, "nan_events": 0},
             },
         }
@@ -186,7 +186,7 @@ class RealRLAdapter:
 
 
 @dataclass(frozen=True)
-class RealFSDPAdapter:
+class RealTeacherFTAdapter:
     mode: str = "real"
 
     def run(
@@ -197,7 +197,7 @@ class RealFSDPAdapter:
         actual_cost_usd: float,
     ) -> dict[str, object]:
         _ = actual_cost_usd
-        result = run_real_fsdp(cfg=cfg, teacher_payload=teacher_payload)
+        result = run_real_teacher_ft(cfg=cfg, teacher_payload=teacher_payload)
         payload = dict(result["payload"])
         payload[REAL_USAGE_KEY] = dict(result["usage"])
         return payload
@@ -244,14 +244,14 @@ def select_stage_adapters(mode: str) -> StageAdapters:
     if mode == "mock":
         return StageAdapters(
             rl=MockRLAdapter(),
-            fsdp=MockFSDPAdapter(),
+            teacher_ft=MockTeacherFTAdapter(),
             distill=MockDistillAdapter(),
             eval=MockEvalAdapter(),
         )
     if mode == "real":
         return StageAdapters(
             rl=RealRLAdapter(),
-            fsdp=RealFSDPAdapter(),
+            teacher_ft=RealTeacherFTAdapter(),
             distill=RealDistillAdapter(),
             eval=RealEvalAdapter(),
         )

@@ -820,10 +820,10 @@ def run_real_rl(*, cfg: ProjectConfig) -> dict[str, object]:
     }
 
 
-def run_real_fsdp(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> dict[str, object]:
+def run_real_teacher_ft(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> dict[str, object]:
     prior_checkpoint = str(teacher_payload.get("checkpoint_path", "")).strip()
     if not prior_checkpoint:
-        raise RuntimeError("FSDP stage requires teacher checkpoint_path from RL stage")
+        raise RuntimeError("Teacher FT stage requires teacher checkpoint_path from RL stage")
 
     service = build_service_client()
     retry_config = _runtime_retry_config(cfg)
@@ -831,7 +831,7 @@ def run_real_fsdp(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> 
     training_examples = [(row.prompt, row.reference or row.prompt) for row in prompts]
     train_client = service.create_training_client_from_state_with_optimizer(
         prior_checkpoint,
-        user_metadata={"stage": "fsdp", "pipeline": "inference-projects"},
+        user_metadata={"stage": "teacher_ft", "pipeline": "inference-projects"},
     )
     info = train_client.get_info()
     run_id = str(info.model_id)
@@ -845,13 +845,13 @@ def run_real_fsdp(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> 
         weight_decay=cfg.distillation.weight_decay,
         grad_clip_norm=cfg.distillation.grad_clip,
         max_consecutive_failures=cfg.runtime.max_consecutive_failures,
-        stage="fsdp",
+        stage="teacher_ft",
     )
     checkpoint = _save_training_checkpoints(
         service=service,
         train_client=train_client,
         run_id=run_id,
-        stage="fsdp",
+        stage="teacher_ft",
         poll_interval_seconds=cfg.runtime.real_poll_interval_seconds,
         timeout_seconds=cfg.runtime.real_poll_timeout_seconds,
     )
@@ -860,7 +860,7 @@ def run_real_fsdp(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> 
         service=service,
         prompts=[row.prompt for row in eval_prompts],
         prompt_rows=eval_prompts,
-        stage="fsdp",
+        stage="teacher_ft",
         model_label="teacher",
         model_path=checkpoint.sampler_checkpoint_path,
         max_tokens=cfg.evaluation.max_tokens_eval,
@@ -873,23 +873,23 @@ def run_real_fsdp(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> 
     overlap_scores = [_score_overlap(out, row.reference) for out, row in zip(sampled.outputs, eval_prompts)]
     sampled_quality = _mean(overlap_scores)
     quality_score = round(max(prior_quality, sampled_quality), 4)
-    fsdp_nan_events = int(training["nan_events"])
-    stability_score = round(max(0.0, 1.0 - (fsdp_nan_events / max(1, int(training["steps"])))), 4)
+    teacher_ft_nan_events = int(training["nan_events"])
+    stability_score = round(max(0.0, 1.0 - (teacher_ft_nan_events / max(1, int(training["steps"])))), 4)
 
     return {
         "payload": {
             "model": cfg.teacher_model,
-            "stage": "fsdp",
+            "stage": "teacher_ft",
             "quality_score": quality_score,
             "stability_score": stability_score,
             "checkpoint_path": checkpoint.checkpoint_path,
             "sampler_checkpoint_path": checkpoint.sampler_checkpoint_path,
             "run_id": checkpoint.run_id,
-            "axolotl_fsdp": True,
+            "axolotl_teacher_ft": True,
             "rl_stability_score": float(teacher_payload.get("rl_stability_score", 0.92)),
             "rl_nan_events": int(teacher_payload.get("rl_nan_events", 0)),
-            "fsdp_stability_score": stability_score,
-            "fsdp_nan_events": fsdp_nan_events,
+            "teacher_ft_stability_score": stability_score,
+            "teacher_ft_nan_events": teacher_ft_nan_events,
             "training": {
                 "steps": int(training["steps"]),
                 "batches_per_epoch": int(training["batches_per_epoch"]),
@@ -903,7 +903,7 @@ def run_real_fsdp(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> 
                 "train_examples": len(training_examples),
                 "source_checkpoint_path": prior_checkpoint,
             },
-            "notes": "Real FSDP stage resumed with optimizer state and completed iterative training.",
+            "notes": "Real Teacher FT stage resumed with optimizer state and completed iterative training.",
             PROMPT_TRACES_KEY: sampled.trace_rows,
         },
         "usage": _usage_dict(
@@ -918,7 +918,7 @@ def run_real_fsdp(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> 
                 "sampling_session_id": sampled.session_id,
                 "training_steps": int(training["steps"]),
                 "training_loss_trace_count": len(training["loss_trace"]),
-                "stage": "fsdp",
+                "stage": "teacher_ft",
             },
         ),
     }
@@ -929,7 +929,7 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
         teacher_payload.get("sampler_checkpoint_path", teacher_payload.get("checkpoint_path", ""))
     ).strip()
     if not teacher_checkpoint_path:
-        raise RuntimeError("Distill stage requires teacher checkpoint_path from FSDP stage")
+        raise RuntimeError("Distill stage requires teacher checkpoint_path from Teacher FT stage")
 
     service = build_service_client()
     retry_config = _runtime_retry_config(cfg)
@@ -1318,8 +1318,8 @@ def run_real_eval(
         savings_pct = round((1 - (student_cost_per_1k / teacher_cost_per_1k)) * 100, 2)
 
     rl_stability = float(teacher_payload.get("rl_stability_score", teacher_payload.get("stability_score", 0.90)))
-    fsdp_stability = float(
-        teacher_payload.get("fsdp_stability_score", teacher_payload.get("stability_score", 0.88))
+    teacher_ft_stability = float(
+        teacher_payload.get("teacher_ft_stability_score", teacher_payload.get("stability_score", 0.88))
     )
     distill_stability = float(
         student_payload.get("distill_stability_score", student_payload.get("stability_score", 0.87))
@@ -1467,9 +1467,9 @@ def run_real_eval(
                     "stability_score": rl_stability,
                     "nan_events": int(teacher_payload.get("rl_nan_events", 0)),
                 },
-                "fsdp": {
-                    "stability_score": fsdp_stability,
-                    "nan_events": int(teacher_payload.get("fsdp_nan_events", 0)),
+                "teacher_ft": {
+                    "stability_score": teacher_ft_stability,
+                    "nan_events": int(teacher_payload.get("teacher_ft_nan_events", 0)),
                 },
                 "distill": {
                     "stability_score": distill_stability,
