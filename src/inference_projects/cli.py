@@ -11,7 +11,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="RL + FSDP + Distillation pipeline")
     parser.add_argument(
         "command",
-        choices=["rl", "fsdp", "distill", "eval", "report", "all", "smoke", "preflight", "dryrun", "campaign"],
+        choices=["rl", "fsdp", "distill", "eval", "report", "all", "smoke", "preflight", "dryrun", "campaign", "tune"],
     )
     parser.add_argument(
         "--mode",

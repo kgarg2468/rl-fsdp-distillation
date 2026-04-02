@@ -36,3 +36,10 @@ def test_cli_parses_campaign_flags():
     assert args.mode == "real"
     assert args.prior_ledger == "/tmp/prior-ledger.json"
     assert args.project_hard_cap_usd == 35.0
+
+
+def test_cli_supports_tune_command():
+    parser = build_parser()
+    args = parser.parse_args(["tune", "--mode", "mock", "--state-dir", "/tmp/state"])
+    assert args.command == "tune"
+    assert args.mode == "mock"

@@ -30,7 +30,19 @@ from inference_projects.schemas import (
 from inference_projects.tinker_runtime import REAL_USAGE_KEY
 from inference_projects.tinker_runtime import EVAL_ROWS_KEY, PROMPT_TRACES_KEY
 
-SUPPORTED_COMMANDS = {"rl", "fsdp", "distill", "eval", "report", "all", "smoke", "preflight", "dryrun", "campaign"}
+SUPPORTED_COMMANDS = {
+    "rl",
+    "fsdp",
+    "distill",
+    "eval",
+    "report",
+    "all",
+    "smoke",
+    "preflight",
+    "dryrun",
+    "campaign",
+    "tune",
+}
 
 
 @dataclass(frozen=True)
@@ -106,6 +118,15 @@ def run_pipeline_command(
 
     if command == "campaign":
         return run_campaign(
+            cfg=cfg,
+            mode=resolved_mode,
+            state_dir=paths.root,
+            prior_ledger=Path(prior_ledger) if prior_ledger else None,
+            project_hard_cap_usd=float(project_hard_cap_usd),
+        )
+
+    if command == "tune":
+        return run_tune(
             cfg=cfg,
             mode=resolved_mode,
             state_dir=paths.root,
@@ -443,6 +464,18 @@ def run_campaign(
     summary_path.write_text(json.dumps(summary, indent=2) + "\n")
     report_path.write_text(campaign_utils.format_campaign_report(summary))
     return summary
+
+
+def run_tune(
+    *,
+    cfg: ProjectConfig,
+    mode: str,
+    state_dir: Path,
+    prior_ledger: Path | None,
+    project_hard_cap_usd: float,
+) -> dict[str, object]:
+    _ = (cfg, mode, state_dir, prior_ledger, project_hard_cap_usd)
+    raise NotImplementedError("Tune command is not implemented yet")
 
 
 def _projected_and_actual_mock(stage: str, cfg: ProjectConfig) -> tuple[TokenUsage, float, TokenUsage, float]:
