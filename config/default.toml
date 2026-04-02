@@ -76,6 +76,7 @@ min_runs = 2
 max_runs = 3
 bootstrap_reps = 5000
 early_stop_threshold = 0.03
+strict_run_cap = 16
 
 [tuning]
 stage1_prompt_limit = 30
@@ -83,3 +84,4 @@ stage2_prompt_limit = 150
 sweep_runs = 16
 teacher_candidates = ["meta-llama/Llama-3.1-8B"]
 promotion_top_k = 2
+strict_run_cap = 16
