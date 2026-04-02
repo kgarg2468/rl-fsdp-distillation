@@ -933,9 +933,10 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
 
     service = build_service_client()
     retry_config = _runtime_retry_config(cfg)
+    training_prompt_file = cfg.distillation.training_prompt_file or cfg.evaluation.prompt_file
     prompts = load_canary_prompts(
         limit=cfg.distillation.training_prompt_limit,
-        fixture_path=cfg.evaluation.prompt_file,
+        fixture_path=training_prompt_file,
     )
     prompt_texts = [row.prompt for row in prompts]
     teacher_prompt_texts = [
@@ -977,6 +978,8 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
         teacher_parse = _numeric_parse_rate(teacher_output) == 1.0
         teacher_exact = _exact_numeric_match(teacher_output, row.reference) == 1.0
         baseline_exact = _exact_numeric_match(baseline_output, row.reference) == 1.0
+        teacher_overlap = _score_overlap(teacher_output, row.reference)
+        baseline_overlap = _score_overlap(baseline_output, row.reference)
         distill_rows.append(
             {
                 "row_id": row.row_id,
@@ -984,12 +987,17 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
                 "reference": row.reference,
                 "teacher_output": teacher_output,
                 "baseline_output": baseline_output,
+                "teacher_overlap": round(teacher_overlap, 4),
+                "baseline_overlap": round(baseline_overlap, 4),
+                "teacher_minus_baseline_overlap": round(teacher_overlap - baseline_overlap, 4),
                 "teacher_refusal_like": teacher_refusal,
                 "teacher_numeric_parse": teacher_parse,
                 "teacher_exact_match": teacher_exact,
                 "baseline_exact_match": baseline_exact,
                 "baseline_fail_teacher_pass": (not baseline_exact) and teacher_exact,
                 "selected_for_distill": False,
+                "selected_for_teacher_target": False,
+                "target_source": "",
             }
         )
 
@@ -1005,8 +1013,26 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
     eligible = [row for row in distill_rows if _eligible(row)]
     if not eligible:
         eligible = list(distill_rows)
-    hard = [row for row in eligible if bool(row["baseline_fail_teacher_pass"])]
-    easy = [row for row in eligible if not bool(row["baseline_fail_teacher_pass"])]
+
+    def _selection_key(row: dict[str, object]) -> tuple[float, int, int, int, str]:
+        return (
+            float(row["teacher_minus_baseline_overlap"]),
+            1 if bool(row["baseline_fail_teacher_pass"]) else 0,
+            1 if bool(row["teacher_exact_match"]) else 0,
+            1 if bool(row["teacher_numeric_parse"]) else 0,
+            str(row["row_id"]),
+        )
+
+    hard = sorted(
+        [row for row in eligible if bool(row["baseline_fail_teacher_pass"])],
+        key=_selection_key,
+        reverse=True,
+    )
+    easy = sorted(
+        [row for row in eligible if not bool(row["baseline_fail_teacher_pass"])],
+        key=_selection_key,
+        reverse=True,
+    )
     target_size = len(eligible)
     target_hard = min(len(hard), int(round(target_size * cfg.distillation.hard_example_ratio)))
     selected_rows = [*hard[:target_hard], *easy[: max(0, target_size - target_hard)]]
@@ -1026,15 +1052,33 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
 
     selected_rows = list(selected_rows)
     selected_prompt_rows = [row for row in prompts if row.row_id in selected_row_ids]
+    teacher_target_pool = [
+        row
+        for row in selected_rows
+        if bool(row["teacher_numeric_parse"])
+        and not bool(row["teacher_refusal_like"])
+        and float(row["teacher_minus_baseline_overlap"]) >= 0.0
+    ]
+    if not teacher_target_pool:
+        teacher_target_pool = [
+            row for row in selected_rows if bool(str(row.get("teacher_output", "")).strip())
+        ]
+    teacher_target_pool = sorted(teacher_target_pool, key=_selection_key, reverse=True)
+    target_teacher_count = int(round(len(selected_rows) * cfg.distillation.kd_alpha))
+    target_teacher_count = min(target_teacher_count, len(teacher_target_pool))
+    teacher_target_ids = {
+        str(row["row_id"]) for row in teacher_target_pool[:target_teacher_count]
+    }
+
     kd_examples: list[tuple[str, str]] = []
     for row in selected_rows:
         row_id = str(row["row_id"])
-        target_text = _select_kd_target(
-            row_id=row_id,
-            teacher_output=str(row["teacher_output"]),
-            reference=str(row["reference"]),
-            kd_alpha=cfg.distillation.kd_alpha,
-        )
+        teacher_output = str(row["teacher_output"]).strip()
+        reference = str(row["reference"]).strip()
+        use_teacher_target = row_id in teacher_target_ids and bool(teacher_output)
+        target_text = teacher_output if use_teacher_target else (reference or teacher_output)
+        row["selected_for_teacher_target"] = use_teacher_target
+        row["target_source"] = "teacher" if use_teacher_target else "reference"
         kd_examples.append((str(row["prompt"]), target_text))
 
     student_train_client = service.create_lora_training_client(
@@ -1123,6 +1167,7 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
             "distill_nan_events": distill_nan_events,
             "distillation_config": {
                 "training_prompt_limit": cfg.distillation.training_prompt_limit,
+                "training_prompt_file": str(training_prompt_file),
                 "teacher_prompt_template": cfg.distillation.teacher_prompt_template,
                 "filter_profile": cfg.distillation.filter_profile,
                 "hard_example_ratio": cfg.distillation.hard_example_ratio,
@@ -1154,6 +1199,8 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
                 "eligible_rows": len(eligible),
                 "selected_rows": len(selected_rows),
                 "selected_hard_rows": sum(1 for row in selected_rows if bool(row["baseline_fail_teacher_pass"])),
+                "teacher_target_rows": sum(1 for row in selected_rows if bool(row["selected_for_teacher_target"])),
+                "reference_target_rows": sum(1 for row in selected_rows if not bool(row["selected_for_teacher_target"])),
                 "selected_hard_ratio": round(
                     (
                         sum(1 for row in selected_rows if bool(row["baseline_fail_teacher_pass"]))
