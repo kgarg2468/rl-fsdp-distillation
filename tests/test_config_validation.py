@@ -33,7 +33,9 @@ def test_real_canary_config_loads_successfully():
     assert cfg.distillation.filter_profile == "moderate"
     assert cfg.distillation.lora_rank == 8
     assert cfg.campaign.seeds == (17, 29, 43)
+    assert cfg.campaign.strict_run_cap == 16
     assert cfg.tuning.sweep_runs == 16
+    assert cfg.tuning.strict_run_cap == 16
     assert cfg.tuning.teacher_candidates == (cfg.teacher_model,)
 
 
