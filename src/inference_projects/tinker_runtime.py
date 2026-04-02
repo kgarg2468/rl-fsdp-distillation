@@ -253,6 +253,7 @@ def sample_prompts(
     max_tokens: int = 24,
     seed: int = 42,
     temperature: float = 0.2,
+    stop_tokens: tuple[str, ...] | None = None,
     max_concurrency: int = 1,
     batch_size: int | None = None,
 ) -> SamplingBatch:
@@ -292,7 +293,12 @@ def sample_prompts(
             response = sampler.sample(
                 prompt=ModelInput.from_ints(prompt_ids),
                 num_samples=1,
-                sampling_params=SamplingParams(max_tokens=max_tokens, seed=seed + idx, temperature=temperature),
+                sampling_params=SamplingParams(
+                    max_tokens=max_tokens,
+                    seed=seed + idx,
+                    temperature=temperature,
+                    stop=list(stop_tokens) if stop_tokens else None,
+                ),
             ).result()
             sample_count = 0
             output_text = ""
@@ -680,6 +686,8 @@ def run_real_eval(
         base_model=cfg.baseline_model,
         max_tokens=cfg.evaluation.max_tokens_eval,
         seed=cfg.seed,
+        temperature=cfg.evaluation.eval_temperature,
+        stop_tokens=cfg.evaluation.eval_stop_tokens,
         max_concurrency=cfg.evaluation.max_concurrency,
         batch_size=cfg.evaluation.batch_size,
     )
@@ -693,6 +701,8 @@ def run_real_eval(
         base_model=None if teacher_checkpoint_path else cfg.teacher_model,
         max_tokens=cfg.evaluation.max_tokens_eval,
         seed=cfg.seed,
+        temperature=cfg.evaluation.eval_temperature,
+        stop_tokens=cfg.evaluation.eval_stop_tokens,
         max_concurrency=cfg.evaluation.max_concurrency,
         batch_size=cfg.evaluation.batch_size,
     )
@@ -706,6 +716,8 @@ def run_real_eval(
         base_model=None if student_checkpoint_path else cfg.student_model,
         max_tokens=cfg.evaluation.max_tokens_eval,
         seed=cfg.seed,
+        temperature=cfg.evaluation.eval_temperature,
+        stop_tokens=cfg.evaluation.eval_stop_tokens,
         max_concurrency=cfg.evaluation.max_concurrency,
         batch_size=cfg.evaluation.batch_size,
     )
