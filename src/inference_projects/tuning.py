@@ -110,9 +110,10 @@ def teacher_headroom_candidates(
     current_teacher: str,
     stronger_teacher: str,
     max_tokens_candidates: tuple[int, ...],
+    teacher_candidates: tuple[str, ...] | None = None,
+    sweep_runs: int | None = None,
 ) -> list[dict[str, object]]:
     token_levels = _pick_two_levels(max_tokens_candidates)
-    model_levels = (current_teacher, stronger_teacher)
     prompt_levels = ("raw", "numeric_strict")
     temp_levels = (0.0, 0.2)
 
@@ -128,17 +129,39 @@ def teacher_headroom_candidates(
         (1, 1, 1, 1),
     )
     candidates: list[dict[str, object]] = []
-    for idx, row in enumerate(design, start=1):
-        candidates.append(
-            {
-                "candidate_id": f"teacher-{idx:02d}",
-                "phase": "teacher_headroom",
-                "teacher_model": model_levels[row[0]],
-                "teacher_prompt_template": prompt_levels[row[1]],
-                "eval_temperature": temp_levels[row[2]],
-                "max_tokens_eval": token_levels[row[3]],
-            }
-        )
+    if teacher_candidates:
+        model_levels = tuple(dict.fromkeys(str(model).strip() for model in teacher_candidates if str(model).strip()))
+        if not model_levels:
+            raise ValueError("teacher_headroom_candidates requires at least one teacher model")
+        candidate_index = 1
+        for teacher_model in model_levels:
+            for row in design:
+                candidates.append(
+                    {
+                        "candidate_id": f"teacher-{candidate_index:02d}",
+                        "phase": "teacher_headroom",
+                        "teacher_model": teacher_model,
+                        "teacher_prompt_template": prompt_levels[row[1]],
+                        "eval_temperature": temp_levels[row[2]],
+                        "max_tokens_eval": token_levels[row[3]],
+                    }
+                )
+                candidate_index += 1
+    else:
+        model_levels = (current_teacher, stronger_teacher)
+        for idx, row in enumerate(design, start=1):
+            candidates.append(
+                {
+                    "candidate_id": f"teacher-{idx:02d}",
+                    "phase": "teacher_headroom",
+                    "teacher_model": model_levels[row[0]],
+                    "teacher_prompt_template": prompt_levels[row[1]],
+                    "eval_temperature": temp_levels[row[2]],
+                    "max_tokens_eval": token_levels[row[3]],
+                }
+            )
+    if sweep_runs is not None and sweep_runs > 0:
+        return candidates[:sweep_runs]
     return candidates
 
 
@@ -180,14 +203,40 @@ def candidate_acceptance(
     *,
     metrics: dict[str, Any],
     integrity_passed: bool,
+    min_teacher_margin: float = 0.05,
+    min_student_gain: float = 0.03,
+    min_student_exact_gain: float = 0.02,
+    min_student_numeric_parse: float = 0.95,
+    max_eval_duration_seconds: float = 720.0,
 ) -> dict[str, bool]:
     means = metrics.get("means", {}) if isinstance(metrics, dict) else {}
     teacher_margin = float(means.get("teacher", 0.0)) - float(means.get("baseline", 0.0))
     student_gain = float(means.get("student", 0.0)) - float(means.get("baseline", 0.0))
+    student_exact_gain = float(means.get("student_minus_baseline_exact_match", 0.0))
+    student_numeric_parse = float(means.get("student_numeric_parse_rate", 1.0))
+    eval_duration_seconds = float(metrics.get("eval_duration_seconds", 0.0))
+    teacher_margin_pass = teacher_margin >= min_teacher_margin
+    student_gain_pass = student_gain >= min_student_gain
+    student_exact_gain_pass = student_exact_gain >= min_student_exact_gain
+    student_numeric_parse_pass = student_numeric_parse >= min_student_numeric_parse
+    eval_runtime_pass = eval_duration_seconds <= max_eval_duration_seconds
+    integrity_pass = bool(integrity_passed)
+    composite_pass = (
+        teacher_margin_pass
+        and student_gain_pass
+        and student_exact_gain_pass
+        and student_numeric_parse_pass
+        and eval_runtime_pass
+        and integrity_pass
+    )
     return {
-        "teacher_margin_pass": teacher_margin >= 0.05,
-        "student_gain_pass": student_gain >= 0.03,
-        "integrity_pass": bool(integrity_passed),
+        "teacher_margin_pass": teacher_margin_pass,
+        "student_gain_pass": student_gain_pass,
+        "student_exact_gain_pass": student_exact_gain_pass,
+        "student_numeric_parse_pass": student_numeric_parse_pass,
+        "eval_runtime_pass": eval_runtime_pass,
+        "integrity_pass": integrity_pass,
+        "composite_pass": composite_pass,
     }
 
 
@@ -209,6 +258,9 @@ def promote_candidates(candidates: list[dict[str, Any]], *, top_k: int) -> list[
         for row in candidates
         if bool(row.get("teacher_margin_pass"))
         and bool(row.get("student_gain_pass"))
+        and bool(row.get("student_exact_gain_pass", True))
+        and bool(row.get("student_numeric_parse_pass", True))
+        and bool(row.get("eval_runtime_pass", True))
         and bool(row.get("integrity_pass"))
     ]
     ranked = sorted(
@@ -216,6 +268,7 @@ def promote_candidates(candidates: list[dict[str, Any]], *, top_k: int) -> list[
         key=lambda row: (
             float(row.get("student_minus_baseline", -999.0)),
             float(row.get("student_minus_baseline_exact_match", -999.0)),
+            float(row.get("student_numeric_parse_rate", -999.0)),
             -float(row.get("eval_duration_seconds", 0.0)),
         ),
         reverse=True,
