@@ -295,3 +295,108 @@ def test_campaign_integrity_warn_sets_needs_debug_without_forced_stop(tmp_path: 
     assert summary is not None
     assert summary["campaign_status"] == "needs_debug"
     assert all(run["integrity"]["status"] == "warn" for run in summary["runs"])
+
+
+def test_campaign_respects_strict_run_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg_path = tmp_path / "cap.toml"
+    cfg_text = Path("config/default.toml").read_text().replace("strict_run_cap = 16", "strict_run_cap = 1", 1)
+    cfg_path.write_text(cfg_text)
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("TINKER_API_KEY", "dummy")
+    monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
+    _patch_fake_real_adapters(monkeypatch, student_score_for_seed=lambda seed: 0.35)
+
+    summary = run_pipeline_command("campaign", mode="real", state_dir=state_dir, config_path=cfg_path)
+    assert summary is not None
+    assert summary["executed_seeds"] == [17]
+    assert summary["campaign_status"] in {"ok", "needs_debug"}
+
+
+def test_campaign_emits_summary_on_failure_and_resumes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    state_dir = tmp_path / "state"
+    cfg_path = tmp_path / "retry_once.toml"
+    cfg_text = Path("config/default.toml").read_text().replace("max_consecutive_failures = 5", "max_consecutive_failures = 1")
+    cfg_path.write_text(cfg_text)
+    monkeypatch.setenv("TINKER_API_KEY", "dummy")
+    monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
+
+    class BrokenDistill(FakeRealDistill):
+        def run(self, *, cfg, teacher_payload, actual_cost_usd):
+            raise RuntimeError("forced-distill-failure")
+
+    monkeypatch.setattr(
+        "inference_projects.pipeline.select_stage_adapters",
+        lambda mode: StageAdapters(
+            rl=FakeRealRL(),
+            fsdp=FakeRealFSDP(),
+            distill=BrokenDistill(),
+            eval=FakeRealEval(student_score_for_seed=lambda seed: 0.35),
+        ),
+    )
+    with pytest.raises(RuntimeError):
+        run_pipeline_command("campaign", mode="real", state_dir=state_dir, config_path=cfg_path)
+    failed_summary = json.loads((state_dir / "campaign" / "campaign_summary.json").read_text())
+    assert failed_summary["campaign_status"] == "failed"
+    assert failed_summary["failure_class"] in {"failed", "invariant_failed", "transient_exhausted", "stalled"}
+
+    call_counts = {"rl": 0, "fsdp": 0}
+
+    class CountRL(FakeRealRL):
+        def run(self, *, cfg, actual_cost_usd):
+            call_counts["rl"] += 1
+            return super().run(cfg=cfg, actual_cost_usd=actual_cost_usd)
+
+    class CountFSDP(FakeRealFSDP):
+        def run(self, *, cfg, teacher_payload, actual_cost_usd):
+            call_counts["fsdp"] += 1
+            return super().run(cfg=cfg, teacher_payload=teacher_payload, actual_cost_usd=actual_cost_usd)
+
+    monkeypatch.setattr(
+        "inference_projects.pipeline.select_stage_adapters",
+        lambda mode: StageAdapters(
+            rl=CountRL(),
+            fsdp=CountFSDP(),
+            distill=FakeRealDistill(),
+            eval=FakeRealEval(student_score_for_seed=lambda seed: 0.35),
+        ),
+    )
+    summary = run_pipeline_command("campaign", mode="real", state_dir=state_dir, config_path=cfg_path)
+    assert summary is not None
+    assert call_counts["rl"] == 1
+    assert call_counts["fsdp"] == 1
+
+
+def test_campaign_stall_timeout_marks_failed_and_emits_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg_path = tmp_path / "timeout.toml"
+    cfg_text = Path("config/default.toml").read_text().replace("max_consecutive_failures = 5", "max_consecutive_failures = 1")
+    cfg_path.write_text(cfg_text)
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("TINKER_API_KEY", "dummy")
+    monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
+
+    class SlowRL(FakeRealRL):
+        def run(self, *, cfg, actual_cost_usd):
+            import time as _time
+
+            _time.sleep(0.2)
+            return super().run(cfg=cfg, actual_cost_usd=actual_cost_usd)
+
+    monkeypatch.setattr(
+        "inference_projects.pipeline.select_stage_adapters",
+        lambda mode: StageAdapters(
+            rl=SlowRL(),
+            fsdp=FakeRealFSDP(),
+            distill=FakeRealDistill(),
+            eval=FakeRealEval(student_score_for_seed=lambda seed: 0.35),
+        ),
+    )
+    with pytest.raises(RuntimeError):
+        run_pipeline_command(
+            "campaign",
+            mode="real",
+            state_dir=state_dir,
+            config_path=cfg_path,
+            progress_timeout_seconds=0.05,
+        )
+    summary = json.loads((state_dir / "campaign" / "campaign_summary.json").read_text())
+    assert summary["failure_class"] == "stalled"
