@@ -100,8 +100,6 @@ def run_pipeline_command(
     mode: str | None = None,
     config_path: Path | str = Path("config/default.toml"),
     state_dir: Path | str = Path("."),
-    prior_ledger: Path | str | None = None,
-    project_hard_cap_usd: float = 35.0,
 ) -> dict[str, object] | None:
     if command not in SUPPORTED_COMMANDS:
         raise ValueError(f"Unknown command: {command}")
@@ -118,7 +116,6 @@ def run_pipeline_command(
         return _dryrun_summary(cfg, resolved_mode)
 
     if command == "campaign":
-        _ = (prior_ledger, project_hard_cap_usd)
         return run_campaign(
             cfg=cfg,
             mode=resolved_mode,
@@ -126,7 +123,6 @@ def run_pipeline_command(
         )
 
     if command == "tune":
-        _ = (prior_ledger, project_hard_cap_usd)
         return run_tune(
             cfg=cfg,
             mode=resolved_mode,
@@ -179,18 +175,6 @@ def _dryrun_summary(cfg: ProjectConfig, mode: str) -> dict[str, object]:
         "stages": stages,
         "warnings": preflight.warnings,
     }
-
-
-def _load_prior_spend(prior_ledger: Path | None) -> float:
-    if prior_ledger is None:
-        return 0.0
-    if not prior_ledger.exists():
-        raise FileNotFoundError(f"Prior ledger file not found: {prior_ledger}")
-    payload = json.loads(prior_ledger.read_text())
-    total_spend = payload.get("total_spend_usd")
-    if not isinstance(total_spend, (int, float)):
-        raise RuntimeError(f"Prior ledger missing numeric total_spend_usd: {prior_ledger}")
-    return round(float(total_spend), 4)
 
 
 def _campaign_required_artifacts(paths: PipelinePaths, stage: str) -> list[Path]:
@@ -400,13 +384,9 @@ def run_campaign(
             "pooled": pooled,
         },
         "early_stop": early_stop,
-        "budget": {
-            "hard_cap_usd": None,
-            "prior_spend_usd": 0.0,
+        "spend": {
             "new_spend_usd": round(new_spend_usd, 4),
             "total_spend_usd": round(new_spend_usd, 4),
-            "stopped_for_budget": False,
-            "prior_ledger_path": None,
         },
         "stop_reason": stop_reason,
     }
@@ -652,7 +632,7 @@ def run_tune(
             state_dir=tuning_dir / "final_campaign",
         )
         final_campaign_summary = campaign_summary
-        final_campaign_new_spend = float(campaign_summary.get("budget", {}).get("new_spend_usd", 0.0))
+        final_campaign_new_spend = float(campaign_summary.get("spend", {}).get("new_spend_usd", 0.0))
         confirm_spend_usd = round(confirm_spend_usd + final_campaign_new_spend, 4)
         project_new_spend_usd = round(project_new_spend_usd + final_campaign_new_spend, 4)
         final_campaign_info = {

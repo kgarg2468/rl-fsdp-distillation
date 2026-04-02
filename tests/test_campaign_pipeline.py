@@ -242,8 +242,7 @@ def test_campaign_spend_fields_are_informational(tmp_path: Path, monkeypatch: py
         state_dir=state_dir,
     )
     assert summary is not None
-    assert summary["budget"]["stopped_for_budget"] is False
-    assert summary["budget"]["hard_cap_usd"] is None
+    assert summary["spend"]["new_spend_usd"] >= 0.0
 
 
 def test_campaign_integrity_failure_sets_needs_debug_and_stops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
