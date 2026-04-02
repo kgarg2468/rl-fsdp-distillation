@@ -1290,26 +1290,46 @@ def run_real_eval(
         "teacher": _model_health(teacher.outputs),
         "student": _model_health(student.outputs),
     }
-    teacher_integrity_failed = (
-        health["teacher"]["refusal_rate"] >= cfg.evaluation.teacher_integrity_refusal_threshold
-        or (
-            teacher_quality <= cfg.evaluation.teacher_integrity_min_score
-            and baseline_quality >= max(0.30, cfg.evaluation.teacher_integrity_min_score + 0.20)
-        )
+    integrity_reasons: list[str] = []
+    integrity_status = "pass"
+    refusal_failed = health["teacher"]["refusal_rate"] >= cfg.evaluation.teacher_integrity_refusal_threshold
+    near_zero_failed = (
+        teacher_quality <= cfg.evaluation.teacher_integrity_min_score
+        and baseline_quality >= max(0.30, cfg.evaluation.teacher_integrity_min_score + 0.20)
     )
-    integrity_reason = ""
-    if teacher_integrity_failed:
-        if health["teacher"]["refusal_rate"] >= cfg.evaluation.teacher_integrity_refusal_threshold:
-            integrity_reason = (
-                "teacher refusal rate "
-                f"{health['teacher']['refusal_rate']:.4f} exceeded threshold "
-                f"{cfg.evaluation.teacher_integrity_refusal_threshold:.4f}"
-            )
-        else:
-            integrity_reason = (
-                "teacher overlap near-zero while baseline remained strong "
-                f"(teacher={teacher_quality:.4f}, baseline={baseline_quality:.4f})"
-            )
+    parse_warn = teacher_numeric_parse < cfg.evaluation.teacher_integrity_numeric_parse_threshold
+    margin_warn = teacher_quality < baseline_quality
+
+    if refusal_failed:
+        integrity_status = "fail"
+        integrity_reasons.append(
+            "teacher refusal rate "
+            f"{health['teacher']['refusal_rate']:.4f} exceeded threshold "
+            f"{cfg.evaluation.teacher_integrity_refusal_threshold:.4f}"
+        )
+    if near_zero_failed:
+        integrity_status = "fail"
+        integrity_reasons.append(
+            "teacher overlap near-zero while baseline remained strong "
+            f"(teacher={teacher_quality:.4f}, baseline={baseline_quality:.4f})"
+        )
+    if parse_warn:
+        if integrity_status == "pass":
+            integrity_status = "warn"
+        integrity_reasons.append(
+            "teacher numeric parse rate "
+            f"{teacher_numeric_parse:.4f} below threshold "
+            f"{cfg.evaluation.teacher_integrity_numeric_parse_threshold:.4f}"
+        )
+    if margin_warn:
+        if integrity_status == "pass":
+            integrity_status = "warn"
+        integrity_reasons.append(
+            "teacher overlap below baseline "
+            f"(teacher={teacher_quality:.4f}, baseline={baseline_quality:.4f})"
+        )
+    integrity_reason = "; ".join(integrity_reasons)
+    integrity_passed = integrity_status == "pass"
 
     eval_rows: list[dict[str, object]] = []
     for (
@@ -1418,14 +1438,16 @@ def run_real_eval(
                 },
             },
             "integrity": {
-                "passed": not teacher_integrity_failed,
-                "status": "ok" if not teacher_integrity_failed else "integrity_failed",
+                "passed": integrity_passed,
+                "status": integrity_status,
                 "reason": integrity_reason,
                 "checks": {
                     "teacher_refusal_rate": health["teacher"]["refusal_rate"],
                     "teacher_refusal_threshold": cfg.evaluation.teacher_integrity_refusal_threshold,
                     "teacher_overlap_score": teacher_quality,
                     "teacher_min_score": cfg.evaluation.teacher_integrity_min_score,
+                    "teacher_numeric_parse_rate": teacher_numeric_parse,
+                    "teacher_numeric_parse_threshold": cfg.evaluation.teacher_integrity_numeric_parse_threshold,
                     "baseline_overlap_score": baseline_quality,
                     "prompt_count": len(prompts),
                 },

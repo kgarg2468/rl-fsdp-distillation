@@ -95,9 +95,11 @@ class FakeRealEval:
         self,
         student_score_for_seed: Callable[[int], float],
         integrity_failed_for_seed: Callable[[int], bool] | None = None,
+        integrity_status_for_seed: Callable[[int], str] | None = None,
     ):
         self._student_score_for_seed = student_score_for_seed
         self._integrity_failed_for_seed = integrity_failed_for_seed or (lambda seed: False)
+        self._integrity_status_for_seed = integrity_status_for_seed
 
     def run(self, *, cfg, teacher_payload, student_payload, actual_cost_usd):
         _ = (teacher_payload, student_payload, actual_cost_usd)
@@ -125,6 +127,11 @@ class FakeRealEval:
 
         student_retention = student_score / teacher_score if teacher_score else 0.0
         savings_pct = 30.0
+        status = (
+            self._integrity_status_for_seed(cfg.seed)
+            if self._integrity_status_for_seed is not None
+            else ("fail" if self._integrity_failed_for_seed(cfg.seed) else "pass")
+        )
         return {
             "quality": {
                 "benchmark": {
@@ -152,9 +159,9 @@ class FakeRealEval:
                 "distill": {"stability_score": 0.88, "nan_events": 0},
             },
             "integrity": {
-                "passed": not self._integrity_failed_for_seed(cfg.seed),
-                "status": "integrity_failed" if self._integrity_failed_for_seed(cfg.seed) else "ok",
-                "reason": "forced-failure" if self._integrity_failed_for_seed(cfg.seed) else "",
+                "passed": status == "pass",
+                "status": status,
+                "reason": "forced-failure" if status == "fail" else ("forced-warning" if status == "warn" else ""),
                 "checks": {"teacher_refusal_rate": 0.9 if self._integrity_failed_for_seed(cfg.seed) else 0.0},
             },
             "_eval_rows": eval_rows,
@@ -166,6 +173,7 @@ def _patch_fake_real_adapters(
     monkeypatch: pytest.MonkeyPatch,
     student_score_for_seed: Callable[[int], float],
     integrity_failed_for_seed: Callable[[int], bool] | None = None,
+    integrity_status_for_seed: Callable[[int], str] | None = None,
 ) -> None:
     monkeypatch.setattr(
         "inference_projects.pipeline.select_stage_adapters",
@@ -176,6 +184,7 @@ def _patch_fake_real_adapters(
             eval=FakeRealEval(
                 student_score_for_seed=student_score_for_seed,
                 integrity_failed_for_seed=integrity_failed_for_seed,
+                integrity_status_for_seed=integrity_status_for_seed,
             ),
         ),
     )
@@ -266,3 +275,23 @@ def test_campaign_integrity_failure_sets_needs_debug_and_stops(tmp_path: Path, m
     assert summary["executed_seeds"] == [17]
     assert summary["runs"][0]["integrity"]["passed"] is False
     assert summary["acceptance_checks"]["integrity_passed_all_runs"] is False
+
+
+def test_campaign_integrity_warn_sets_needs_debug_without_forced_stop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("TINKER_API_KEY", "dummy")
+    monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
+    _patch_fake_real_adapters(
+        monkeypatch,
+        student_score_for_seed=lambda seed: 0.35,
+        integrity_status_for_seed=lambda seed: "warn",
+    )
+
+    summary = run_pipeline_command(
+        "campaign",
+        mode="real",
+        state_dir=state_dir,
+    )
+    assert summary is not None
+    assert summary["campaign_status"] == "needs_debug"
+    assert all(run["integrity"]["status"] == "warn" for run in summary["runs"])

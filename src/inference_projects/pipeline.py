@@ -309,10 +309,15 @@ def run_campaign(
             )
             eval_metrics = _read_json(run_paths.eval_metrics)
             integrity = eval_metrics.get("integrity", {})
-            integrity_passed = bool(integrity.get("passed", True))
+            integrity_status_raw = str(integrity.get("status", "pass"))
+            if integrity_status_raw == "ok":
+                integrity_status_raw = "pass"
+            if integrity_status_raw == "integrity_failed":
+                integrity_status_raw = "fail"
+            integrity_passed = bool(integrity.get("passed", integrity_status_raw == "pass")) and integrity_status_raw == "pass"
             run_summary["integrity"] = {
                 "passed": integrity_passed,
-                "status": str(integrity.get("status", "ok")),
+                "status": integrity_status_raw,
                 "reason": str(integrity.get("reason", "")),
                 "checks": dict(integrity.get("checks", {})) if isinstance(integrity.get("checks"), dict) else {},
             }
@@ -323,13 +328,15 @@ def run_campaign(
                 "integrity_passed": integrity_passed,
             }
             run_summary["acceptance_checks"] = acceptance_checks
-            if not integrity_passed:
+            if integrity_status_raw == "fail":
                 campaign_status = "needs_debug"
                 stop_reason = (
                     f"Stopped after seed {seed} due to quality integrity failure: "
                     f"{run_summary['integrity']['reason'] or 'integrity checks failed'}."
                 )
                 run_halted = True
+            elif integrity_status_raw == "warn":
+                campaign_status = "needs_debug"
 
         run_summaries.append(run_summary)
 
@@ -834,9 +841,15 @@ def _run_tune_candidate(
         )
         eval_metrics = _read_json(run_paths.eval_metrics)
         integrity = eval_metrics.get("integrity", {})
+        integrity_status_raw = str(integrity.get("status", "pass"))
+        if integrity_status_raw == "ok":
+            integrity_status_raw = "pass"
+        if integrity_status_raw == "integrity_failed":
+            integrity_status_raw = "fail"
+        integrity_passed = bool(integrity.get("passed", integrity_status_raw == "pass")) and integrity_status_raw == "pass"
         run_summary["integrity"] = {
-            "passed": bool(integrity.get("passed", True)),
-            "status": str(integrity.get("status", "ok")),
+            "passed": integrity_passed,
+            "status": integrity_status_raw,
             "reason": str(integrity.get("reason", "")),
             "checks": dict(integrity.get("checks", {})) if isinstance(integrity.get("checks"), dict) else {},
         }

@@ -54,6 +54,7 @@ class EvaluationConfig:
     eval_max_tokens_candidates: tuple[int, ...]
     teacher_integrity_refusal_threshold: float
     teacher_integrity_min_score: float
+    teacher_integrity_numeric_parse_threshold: float
 
 
 @dataclass(frozen=True)
@@ -155,6 +156,8 @@ def _validate_evaluation(evaluation: EvaluationConfig) -> None:
         raise ValueError("evaluation.teacher_integrity_refusal_threshold must be in [0, 1]")
     if not (0.0 <= evaluation.teacher_integrity_min_score <= 1.0):
         raise ValueError("evaluation.teacher_integrity_min_score must be in [0, 1]")
+    if not (0.0 <= evaluation.teacher_integrity_numeric_parse_threshold <= 1.0):
+        raise ValueError("evaluation.teacher_integrity_numeric_parse_threshold must be in [0, 1]")
 
 
 def _validate_distillation(distillation: DistillationConfig) -> None:
@@ -282,6 +285,9 @@ def load_config(path: Path | str = Path("config/default.toml")) -> ProjectConfig
             evaluation_raw.get("teacher_integrity_refusal_threshold", 0.30)
         ),
         teacher_integrity_min_score=float(evaluation_raw.get("teacher_integrity_min_score", 0.10)),
+        teacher_integrity_numeric_parse_threshold=float(
+            evaluation_raw.get("teacher_integrity_numeric_parse_threshold", 0.80)
+        ),
     )
     _validate_evaluation(evaluation)
 

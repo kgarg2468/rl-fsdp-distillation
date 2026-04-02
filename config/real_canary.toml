@@ -52,6 +52,7 @@ eval_stop_tokens = []
 eval_max_tokens_candidates = [48, 96]
 teacher_integrity_refusal_threshold = 0.30
 teacher_integrity_min_score = 0.10
+teacher_integrity_numeric_parse_threshold = 0.80
 
 [distillation]
 training_prompt_limit = 150
