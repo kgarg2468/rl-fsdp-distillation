@@ -10,6 +10,7 @@ from typing import Any
 from inference_projects import audit
 from inference_projects import budget
 from inference_projects import campaign as campaign_utils
+from inference_projects import tuning as tuning_utils
 from inference_projects.adapters import (
     DistillStageAdapter,
     EvalStageAdapter,
@@ -474,8 +475,506 @@ def run_tune(
     prior_ledger: Path | None,
     project_hard_cap_usd: float,
 ) -> dict[str, object]:
-    _ = (cfg, mode, state_dir, prior_ledger, project_hard_cap_usd)
-    raise NotImplementedError("Tune command is not implemented yet")
+    if project_hard_cap_usd <= 0:
+        raise ValueError("project_hard_cap_usd must be > 0")
+    if mode == "real" and prior_ledger is None:
+        raise ValueError("Tune command in real mode requires --prior-ledger")
+
+    tuning_dir = state_dir / "tuning"
+    stage1_frozen = tuning_utils.freeze_prompt_slice(
+        source_path=cfg.evaluation.prompt_file,
+        frozen_path=tuning_dir / "frozen_prompts_stage1.jsonl",
+        prompt_limit=cfg.tuning.stage1_prompt_limit,
+    )
+    stage2_frozen = tuning_utils.freeze_prompt_slice(
+        source_path=cfg.evaluation.prompt_file,
+        frozen_path=tuning_dir / "frozen_prompts_stage2.jsonl",
+        prompt_limit=cfg.tuning.stage2_prompt_limit,
+    )
+
+    prior_spend_usd = _load_prior_spend(prior_ledger)
+    remaining_budget_usd = max(0.0, round(project_hard_cap_usd - prior_spend_usd, 4))
+    sweep_cap_usd = round(remaining_budget_usd * cfg.tuning.sweep_budget_fraction, 4)
+    confirm_cap_usd = round(remaining_budget_usd - sweep_cap_usd, 4)
+
+    sweep_spend_usd = 0.0
+    confirm_spend_usd = 0.0
+    project_new_spend_usd = 0.0
+    cap_hit = False
+    stop_reason = ""
+    status = "ok"
+
+    candidate_rows: list[dict[str, Any]] = []
+    teacher_rows: list[dict[str, Any]] = []
+    distill_rows: list[dict[str, Any]] = []
+    confirmation_rows: list[dict[str, Any]] = []
+    promoted_rows: list[dict[str, Any]] = []
+    final_campaign_summary: dict[str, Any] | None = None
+    final_campaign_info: dict[str, object] = {"executed": False}
+
+    stronger_teacher = next((name for name in cfg.tuning.teacher_candidates if name != cfg.teacher_model), cfg.teacher_model)
+    teacher_specs = tuning_utils.teacher_headroom_candidates(
+        current_teacher=cfg.teacher_model,
+        stronger_teacher=stronger_teacher,
+        max_tokens_candidates=cfg.evaluation.eval_max_tokens_candidates,
+    )
+
+    for spec in teacher_specs:
+        candidate_id = str(spec["candidate_id"])
+        run_dir = tuning_dir / "sweeps" / "teacher" / candidate_id
+        try:
+            result = _run_tune_candidate(
+                cfg=cfg,
+                mode=mode,
+                run_dir=run_dir,
+                prompt_file=Path(stage1_frozen.frozen_path),
+                prompt_limit=cfg.tuning.stage1_prompt_limit,
+                teacher_model=str(spec["teacher_model"]),
+                max_tokens_eval=int(spec["max_tokens_eval"]),
+                eval_temperature=float(spec["eval_temperature"]),
+                teacher_prompt_template=str(spec["teacher_prompt_template"]),
+                distill_overrides={},
+                prior_spend_usd=prior_spend_usd,
+                project_new_spend_so_far_usd=project_new_spend_usd,
+                phase_spend_so_far_usd=sweep_spend_usd,
+                phase_cap_usd=sweep_cap_usd,
+                project_hard_cap_usd=project_hard_cap_usd,
+            )
+            fallback_error = ""
+            fallback_teacher_model = ""
+        except Exception as exc:
+            if str(spec["teacher_model"]) == cfg.teacher_model:
+                raise
+            fallback_error = str(exc)
+            fallback_teacher_model = cfg.teacher_model
+            fallback_spec = dict(spec)
+            fallback_spec["teacher_model"] = cfg.teacher_model
+            result = _run_tune_candidate(
+                cfg=cfg,
+                mode=mode,
+                run_dir=run_dir,
+                prompt_file=Path(stage1_frozen.frozen_path),
+                prompt_limit=cfg.tuning.stage1_prompt_limit,
+                teacher_model=str(fallback_spec["teacher_model"]),
+                max_tokens_eval=int(fallback_spec["max_tokens_eval"]),
+                eval_temperature=float(fallback_spec["eval_temperature"]),
+                teacher_prompt_template=str(fallback_spec["teacher_prompt_template"]),
+                distill_overrides={},
+                prior_spend_usd=prior_spend_usd,
+                project_new_spend_so_far_usd=project_new_spend_usd,
+                phase_spend_so_far_usd=sweep_spend_usd,
+                phase_cap_usd=sweep_cap_usd,
+                project_hard_cap_usd=project_hard_cap_usd,
+            )
+            spec = fallback_spec
+
+        run_summary = result["run_summary"]
+        sweep_spend_usd = round(sweep_spend_usd + float(result["new_spend_usd"]), 4)
+        project_new_spend_usd = round(project_new_spend_usd + float(result["new_spend_usd"]), 4)
+
+        row = _build_tune_candidate_row(spec=spec, run_summary=run_summary, phase="teacher_headroom")
+        if fallback_teacher_model:
+            row["fallback_teacher_model"] = fallback_teacher_model
+            row["fallback_error"] = fallback_error
+        candidate_rows.append(row)
+        teacher_rows.append(row)
+
+        if bool(result["stopped_for_budget"]):
+            cap_hit = True
+            stop_reason = str(result["stop_reason"])
+            status = "stopped_for_budget"
+            break
+
+    teacher_ranked = tuning_utils.rank_teacher_candidates(teacher_rows)
+    teacher_winner = teacher_ranked[0] if teacher_ranked else None
+    if teacher_winner is None and status == "ok":
+        status = "needs_debug"
+        stop_reason = "No teacher candidate passed integrity checks in phase-1 sweep."
+
+    if status == "ok" and teacher_winner is not None:
+        for spec in tuning_utils.distill_l8_candidates():
+            candidate_id = str(spec["candidate_id"])
+            run_dir = tuning_dir / "sweeps" / "distill" / candidate_id
+            result = _run_tune_candidate(
+                cfg=cfg,
+                mode=mode,
+                run_dir=run_dir,
+                prompt_file=Path(stage1_frozen.frozen_path),
+                prompt_limit=cfg.tuning.stage1_prompt_limit,
+                teacher_model=str(teacher_winner["teacher_model"]),
+                max_tokens_eval=int(teacher_winner["max_tokens_eval"]),
+                eval_temperature=float(teacher_winner["eval_temperature"]),
+                teacher_prompt_template=str(teacher_winner["teacher_prompt_template"]),
+                distill_overrides={
+                    "filter_profile": str(spec["filter_profile"]),
+                    "hard_example_ratio": float(spec["hard_example_ratio"]),
+                    "kd_alpha": float(spec["kd_alpha"]),
+                    "kd_temperature": float(spec["kd_temperature"]),
+                    "learning_rate": float(spec["learning_rate"]),
+                    "epochs": int(spec["epochs"]),
+                    "lora_rank": int(spec["lora_rank"]),
+                },
+                prior_spend_usd=prior_spend_usd,
+                project_new_spend_so_far_usd=project_new_spend_usd,
+                phase_spend_so_far_usd=sweep_spend_usd,
+                phase_cap_usd=sweep_cap_usd,
+                project_hard_cap_usd=project_hard_cap_usd,
+            )
+            run_summary = result["run_summary"]
+            sweep_spend_usd = round(sweep_spend_usd + float(result["new_spend_usd"]), 4)
+            project_new_spend_usd = round(project_new_spend_usd + float(result["new_spend_usd"]), 4)
+
+            merged = {
+                **spec,
+                "teacher_model": teacher_winner["teacher_model"],
+                "teacher_prompt_template": teacher_winner["teacher_prompt_template"],
+                "eval_temperature": teacher_winner["eval_temperature"],
+                "max_tokens_eval": teacher_winner["max_tokens_eval"],
+            }
+            row = _build_tune_candidate_row(spec=merged, run_summary=run_summary, phase="distill_tuning")
+            candidate_rows.append(row)
+            distill_rows.append(row)
+
+            if bool(result["stopped_for_budget"]):
+                cap_hit = True
+                stop_reason = str(result["stop_reason"])
+                status = "stopped_for_budget"
+                break
+
+    if status == "ok":
+        promoted_rows = tuning_utils.promote_candidates(distill_rows, top_k=cfg.tuning.promotion_top_k)
+        if not promoted_rows:
+            status = "needs_debug"
+            stop_reason = "No distill candidates met strict promotion gates."
+
+    if status == "ok":
+        for promoted in promoted_rows:
+            run_dir = tuning_dir / "confirm" / str(promoted["candidate_id"])
+            result = _run_tune_candidate(
+                cfg=cfg,
+                mode=mode,
+                run_dir=run_dir,
+                prompt_file=Path(stage2_frozen.frozen_path),
+                prompt_limit=cfg.tuning.stage2_prompt_limit,
+                teacher_model=str(promoted["teacher_model"]),
+                max_tokens_eval=int(promoted["max_tokens_eval"]),
+                eval_temperature=float(promoted["eval_temperature"]),
+                teacher_prompt_template=str(promoted["teacher_prompt_template"]),
+                distill_overrides={
+                    "filter_profile": str(promoted["filter_profile"]),
+                    "hard_example_ratio": float(promoted["hard_example_ratio"]),
+                    "kd_alpha": float(promoted["kd_alpha"]),
+                    "kd_temperature": float(promoted["kd_temperature"]),
+                    "learning_rate": float(promoted["learning_rate"]),
+                    "epochs": int(promoted["epochs"]),
+                    "lora_rank": int(promoted["lora_rank"]),
+                },
+                prior_spend_usd=prior_spend_usd,
+                project_new_spend_so_far_usd=project_new_spend_usd,
+                phase_spend_so_far_usd=confirm_spend_usd,
+                phase_cap_usd=confirm_cap_usd,
+                project_hard_cap_usd=project_hard_cap_usd,
+            )
+            run_summary = result["run_summary"]
+            confirm_spend_usd = round(confirm_spend_usd + float(result["new_spend_usd"]), 4)
+            project_new_spend_usd = round(project_new_spend_usd + float(result["new_spend_usd"]), 4)
+
+            row = _build_tune_candidate_row(spec=promoted, run_summary=run_summary, phase="confirm")
+            candidate_rows.append(row)
+            confirmation_rows.append(row)
+
+            if bool(result["stopped_for_budget"]):
+                cap_hit = True
+                stop_reason = str(result["stop_reason"])
+                status = "stopped_for_budget"
+                break
+
+    winner_row: dict[str, Any] | None = None
+    if status == "ok":
+        ranked_confirmation = tuning_utils.promote_candidates(confirmation_rows, top_k=1)
+        if not ranked_confirmation:
+            status = "needs_debug"
+            stop_reason = "No confirmation candidate passed strict gates on 150-prompt slice."
+        else:
+            winner_row = ranked_confirmation[0]
+
+    if status == "ok" and winner_row is not None:
+        final_eval = replace(
+            cfg.evaluation,
+            prompt_file=Path(stage2_frozen.frozen_path),
+            prompt_limit=cfg.tuning.stage2_prompt_limit,
+            max_tokens_eval=int(winner_row["max_tokens_eval"]),
+            eval_temperature=float(winner_row["eval_temperature"]),
+        )
+        final_distill = replace(
+            cfg.distillation,
+            teacher_prompt_template=str(winner_row["teacher_prompt_template"]),
+            filter_profile=str(winner_row["filter_profile"]),
+            hard_example_ratio=float(winner_row["hard_example_ratio"]),
+            kd_alpha=float(winner_row["kd_alpha"]),
+            kd_temperature=float(winner_row["kd_temperature"]),
+            learning_rate=float(winner_row["learning_rate"]),
+            epochs=int(winner_row["epochs"]),
+            lora_rank=int(winner_row["lora_rank"]),
+        )
+        final_cfg = replace(
+            cfg,
+            teacher_model=str(winner_row["teacher_model"]),
+            evaluation=final_eval,
+            distillation=final_distill,
+        )
+        campaign_prior_path = tuning_dir / "final_campaign_prior_ledger.json"
+        campaign_prior_payload = {"total_spend_usd": round(prior_spend_usd + project_new_spend_usd, 4)}
+        campaign_prior_path.parent.mkdir(parents=True, exist_ok=True)
+        campaign_prior_path.write_text(json.dumps(campaign_prior_payload) + "\n")
+
+        campaign_cap = round(prior_spend_usd + sweep_spend_usd + confirm_cap_usd, 4)
+        campaign_summary = run_campaign(
+            cfg=final_cfg,
+            mode=mode,
+            state_dir=tuning_dir / "final_campaign",
+            prior_ledger=campaign_prior_path,
+            project_hard_cap_usd=min(project_hard_cap_usd, campaign_cap),
+        )
+        final_campaign_summary = campaign_summary
+        final_campaign_new_spend = float(campaign_summary.get("budget", {}).get("new_spend_usd", 0.0))
+        confirm_spend_usd = round(confirm_spend_usd + final_campaign_new_spend, 4)
+        project_new_spend_usd = round(project_new_spend_usd + final_campaign_new_spend, 4)
+        final_campaign_info = {
+            "executed": True,
+            "campaign_summary_path": campaign_summary.get("artifacts", {}).get("campaign_summary", ""),
+            "campaign_report_path": campaign_summary.get("artifacts", {}).get("campaign_report", ""),
+            "executed_seeds": campaign_summary.get("executed_seeds", []),
+            "campaign_status": campaign_summary.get("campaign_status", ""),
+        }
+
+    total_spend_usd = round(prior_spend_usd + project_new_spend_usd, 4)
+    if total_spend_usd >= project_hard_cap_usd:
+        cap_hit = True
+
+    candidates_path = tuning_dir / "candidates.jsonl"
+    candidates_path.parent.mkdir(parents=True, exist_ok=True)
+    candidates_path.write_text(
+        "\n".join(json.dumps(row) for row in candidate_rows) + ("\n" if candidate_rows else "")
+    )
+
+    summary: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "mode": mode,
+        "status": status,
+        "stop_reason": stop_reason,
+        "frozen_prompts": {
+            "stage1": stage1_frozen.as_dict(),
+            "stage2": stage2_frozen.as_dict(),
+        },
+        "teacher_sweep": {
+            "runs_executed": len(teacher_rows),
+            "winner": teacher_winner,
+        },
+        "distill_sweep": {
+            "runs_executed": len(distill_rows),
+        },
+        "promoted_candidates": promoted_rows,
+        "confirmation_runs": confirmation_rows,
+        "winner": winner_row,
+        "final_campaign": final_campaign_info,
+        "budget": {
+            "hard_cap_usd": round(project_hard_cap_usd, 4),
+            "prior_spend_usd": round(prior_spend_usd, 4),
+            "remaining_budget_usd": round(remaining_budget_usd, 4),
+            "sweep_cap_usd": round(sweep_cap_usd, 4),
+            "confirm_cap_usd": round(confirm_cap_usd, 4),
+            "sweep_spend_usd": round(sweep_spend_usd, 4),
+            "confirm_spend_usd": round(confirm_spend_usd, 4),
+            "new_spend_usd": round(project_new_spend_usd, 4),
+            "total_spend_usd": total_spend_usd,
+            "cap_hit": cap_hit,
+            "prior_ledger_path": str(prior_ledger) if prior_ledger else None,
+        },
+    }
+    if final_campaign_summary is not None:
+        summary["final_campaign_summary"] = final_campaign_summary
+
+    summary_path = tuning_dir / "tuning_summary.json"
+    report_path = tuning_dir / "tuning_report.md"
+    summary["artifacts"] = {
+        "tuning_summary": str(summary_path),
+        "tuning_report": str(report_path),
+        "candidates": str(candidates_path),
+    }
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n")
+    report_path.write_text(tuning_utils.format_tuning_report(summary))
+    return summary
+
+
+def _build_tune_candidate_row(
+    *,
+    spec: dict[str, Any],
+    run_summary: dict[str, Any],
+    phase: str,
+) -> dict[str, Any]:
+    metrics = run_summary.get("metrics", {})
+    means = metrics.get("means", {}) if isinstance(metrics, dict) else {}
+    teacher_minus_baseline = float(means.get("teacher", 0.0)) - float(means.get("baseline", 0.0))
+    student_minus_baseline = float(means.get("student", 0.0)) - float(means.get("baseline", 0.0))
+    student_minus_baseline_exact = float(means.get("student_minus_baseline_exact_match", 0.0))
+    integrity = run_summary.get("integrity", {})
+    integrity_passed = bool(integrity.get("passed", False))
+    checks = tuning_utils.candidate_acceptance(metrics=metrics, integrity_passed=integrity_passed)
+    row: dict[str, Any] = {
+        **spec,
+        "phase": phase,
+        "seed": int(run_summary.get("seed", 0)),
+        "run_dir": str(run_summary.get("run_dir", "")),
+        "teacher_score": round(float(means.get("teacher", 0.0)), 6),
+        "baseline_score": round(float(means.get("baseline", 0.0)), 6),
+        "student_score": round(float(means.get("student", 0.0)), 6),
+        "teacher_minus_baseline": round(teacher_minus_baseline, 6),
+        "student_minus_baseline": round(student_minus_baseline, 6),
+        "student_minus_baseline_exact_match": round(student_minus_baseline_exact, 6),
+        "eval_duration_seconds": float(run_summary.get("stage_durations_seconds", {}).get("eval", 0.0)),
+        "actual_spend_usd": float(run_summary.get("actual_spend_usd", 0.0)),
+        "integrity_status": str(integrity.get("status", "")),
+        "integrity_reason": str(integrity.get("reason", "")),
+        "integrity_pass": checks["integrity_pass"],
+        "teacher_margin_pass": checks["teacher_margin_pass"],
+        "student_gain_pass": checks["student_gain_pass"],
+        "artifacts": dict(run_summary.get("artifacts", {})),
+    }
+    return row
+
+
+def _run_tune_candidate(
+    *,
+    cfg: ProjectConfig,
+    mode: str,
+    run_dir: Path,
+    prompt_file: Path,
+    prompt_limit: int,
+    teacher_model: str,
+    max_tokens_eval: int,
+    eval_temperature: float,
+    teacher_prompt_template: str,
+    distill_overrides: dict[str, object],
+    prior_spend_usd: float,
+    project_new_spend_so_far_usd: float,
+    phase_spend_so_far_usd: float,
+    phase_cap_usd: float,
+    project_hard_cap_usd: float,
+) -> dict[str, object]:
+    run_paths = PipelinePaths(run_dir)
+    run_cfg = replace(
+        cfg,
+        seed=cfg.campaign.seeds[0],
+        teacher_model=teacher_model,
+        evaluation=replace(
+            cfg.evaluation,
+            prompt_file=prompt_file,
+            prompt_limit=prompt_limit,
+            max_tokens_eval=max_tokens_eval,
+            eval_temperature=eval_temperature,
+        ),
+        distillation=replace(
+            cfg.distillation,
+            teacher_prompt_template=teacher_prompt_template,
+            **distill_overrides,
+        ),
+    )
+    preflight_result = ensure_preflight_ready(mode=mode, cfg=run_cfg, state_dir=run_dir)
+    adapters = select_stage_adapters(mode)
+
+    stage_durations: dict[str, float] = {}
+    completed_stages: list[str] = []
+    stop_reason = ""
+    stopped_for_budget = False
+    candidate_new_spend = 0.0
+
+    for stage in (*REQUIRED_STAGES, "report"):
+        if stage in REQUIRED_STAGES:
+            projected_stage_cost = budget.projected_stage_cost_usd(stage, run_cfg)
+            projected_total = (
+                prior_spend_usd + project_new_spend_so_far_usd + candidate_new_spend + projected_stage_cost
+            )
+            projected_phase = phase_spend_so_far_usd + candidate_new_spend + projected_stage_cost
+            if projected_total > project_hard_cap_usd:
+                stop_reason = (
+                    f"Stopped before stage '{stage}': projected total ${projected_total:.4f} "
+                    f"exceeds project hard cap ${project_hard_cap_usd:.4f}."
+                )
+                stopped_for_budget = True
+                break
+            if projected_phase > phase_cap_usd:
+                stop_reason = (
+                    f"Stopped before stage '{stage}': projected phase spend ${projected_phase:.4f} "
+                    f"exceeds phase cap ${phase_cap_usd:.4f}."
+                )
+                stopped_for_budget = True
+                break
+
+        stage_started = time.monotonic()
+        ledger_before = load_ledger(run_paths.ledger)
+        records_before = len(ledger_before.records)
+
+        if stage == "rl":
+            run_rl(run_cfg, run_paths, adapter=adapters.rl, mode=mode, preflight=preflight_result)
+        elif stage == "fsdp":
+            run_fsdp(run_cfg, run_paths, adapter=adapters.fsdp, mode=mode, preflight=preflight_result)
+        elif stage == "distill":
+            run_distill(run_cfg, run_paths, adapter=adapters.distill, mode=mode, preflight=preflight_result)
+        elif stage == "eval":
+            run_eval(run_cfg, run_paths, adapter=adapters.eval, mode=mode, preflight=preflight_result)
+        elif stage == "report":
+            run_report(run_cfg, run_paths, mode=mode, preflight=preflight_result)
+
+        stage_durations[stage] = round(time.monotonic() - stage_started, 4)
+        ledger_after = _verify_campaign_stage(stage=stage, paths=run_paths, ledger_records_before=records_before)
+        completed_stages.append(stage)
+
+        if stage in REQUIRED_STAGES:
+            delta = round(ledger_after.total_spend_usd - ledger_before.total_spend_usd, 4)
+            if delta < 0:
+                raise RuntimeError(f"Tune candidate stage '{stage}' produced negative spend delta: {delta}")
+            candidate_new_spend = round(candidate_new_spend + delta, 4)
+
+    run_summary: dict[str, Any] = {
+        "seed": run_cfg.seed,
+        "run_dir": str(run_dir),
+        "stages_completed": completed_stages,
+        "stage_durations_seconds": stage_durations,
+        "actual_spend_usd": round(load_ledger(run_paths.ledger).total_spend_usd, 4),
+        "stop_reason": stop_reason,
+        "artifacts": {
+            "eval_report": str(run_paths.report_md),
+            "run_audit_report": str(run_paths.audit_report_md),
+            "eval_rows": str(run_paths.eval_rows),
+            "ledger": str(run_paths.ledger),
+        },
+    }
+    if "eval" in completed_stages:
+        eval_rows = audit.load_eval_rows(run_paths.eval_rows)
+        if not eval_rows:
+            raise RuntimeError(f"Tune candidate did not emit eval rows: {run_paths.eval_rows}")
+        run_summary["metrics"] = campaign_utils.summarize_eval_rows(
+            eval_rows=eval_rows,
+            bootstrap_reps=run_cfg.campaign.bootstrap_reps,
+            rng_seed=run_cfg.seed,
+        )
+        eval_metrics = _read_json(run_paths.eval_metrics)
+        integrity = eval_metrics.get("integrity", {})
+        run_summary["integrity"] = {
+            "passed": bool(integrity.get("passed", True)),
+            "status": str(integrity.get("status", "ok")),
+            "reason": str(integrity.get("reason", "")),
+            "checks": dict(integrity.get("checks", {})) if isinstance(integrity.get("checks"), dict) else {},
+        }
+
+    return {
+        "run_summary": run_summary,
+        "new_spend_usd": round(candidate_new_spend, 4),
+        "stopped_for_budget": stopped_for_budget,
+        "stop_reason": stop_reason,
+    }
 
 
 def _projected_and_actual_mock(stage: str, cfg: ProjectConfig) -> tuple[TokenUsage, float, TokenUsage, float]:
