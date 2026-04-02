@@ -15,6 +15,7 @@ from inference_projects.tinker_runtime import (
     continue_from_checkpoint,
     create_lora_checkpoint,
     load_canary_prompts,
+    run_real_fsdp,
     run_real_rl,
 )
 
@@ -272,3 +273,67 @@ def test_run_real_rl_records_training_metadata(monkeypatch):
     assert result["payload"]["training"]["steps"] == 3
     assert result["payload"]["rl_nan_events"] == 0
     assert result["usage"]["train_tokens"] == 12
+
+
+def test_run_real_fsdp_records_training_metadata(monkeypatch):
+    cfg = load_config()
+    cfg = replace(cfg, evaluation=replace(cfg.evaluation, prompt_limit=2))
+
+    class FakeTrainClient:
+        def get_info(self):
+            return type("Info", (), {"model_id": "run-fsdp"})()
+
+    class FakeService:
+        def create_training_client_from_state_with_optimizer(self, checkpoint_path, user_metadata=None):
+            _ = (checkpoint_path, user_metadata)
+            return FakeTrainClient()
+
+    monkeypatch.setattr("inference_projects.tinker_runtime.build_service_client", lambda: FakeService())
+    monkeypatch.setattr(
+        "inference_projects.tinker_runtime.load_canary_prompts",
+        lambda **kwargs: [
+            type("PromptRow", (), {"row_id": "r1", "prompt": "1+1", "reference": "2"})(),
+            type("PromptRow", (), {"row_id": "r2", "prompt": "2+2", "reference": "4"})(),
+        ],
+    )
+    monkeypatch.setattr(
+        "inference_projects.tinker_runtime._run_training_loop",
+        lambda **kwargs: {
+            "steps": 4,
+            "batches_per_epoch": 2,
+            "nan_events": 1,
+            "loss_trace": [0.7, 0.5],
+            "train_tokens": 16,
+        },
+    )
+    monkeypatch.setattr(
+        "inference_projects.tinker_runtime._save_training_checkpoints",
+        lambda **kwargs: TrainingCheckpoint(
+            run_id="run-fsdp",
+            checkpoint_path="tinker://ckpt/fsdp",
+            sampler_checkpoint_path="tinker://sampler/fsdp",
+        ),
+    )
+    monkeypatch.setattr(
+        "inference_projects.tinker_runtime.sample_prompts",
+        lambda **kwargs: SamplingBatch(
+            outputs=["2", "4"],
+            prefill_tokens=8,
+            sample_tokens=2,
+            session_id="sess-2",
+            trace_rows=[],
+        ),
+    )
+
+    result = run_real_fsdp(
+        cfg=cfg,
+        teacher_payload={
+            "checkpoint_path": "tinker://ckpt/rl",
+            "quality_score": 0.4,
+            "rl_stability_score": 0.9,
+            "rl_nan_events": 0,
+        },
+    )
+    assert result["payload"]["training"]["steps"] == 4
+    assert result["payload"]["fsdp_nan_events"] == 1
+    assert result["usage"]["train_tokens"] == 16

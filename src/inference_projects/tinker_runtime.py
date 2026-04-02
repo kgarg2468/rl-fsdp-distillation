@@ -764,32 +764,54 @@ def run_real_fsdp(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> 
 
     service = build_service_client()
     retry_config = _runtime_retry_config(cfg)
-    prompts = load_canary_prompts(limit=2)
-
-    checkpoint = continue_from_checkpoint(
+    prompts = load_canary_prompts(limit=cfg.evaluation.prompt_limit, fixture_path=cfg.evaluation.prompt_file)
+    training_examples = [(row.prompt, row.reference or row.prompt) for row in prompts]
+    train_client = service.create_training_client_from_state_with_optimizer(
+        prior_checkpoint,
+        user_metadata={"stage": "fsdp", "pipeline": "inference-projects"},
+    )
+    info = train_client.get_info()
+    run_id = str(info.model_id)
+    training = _run_training_loop(
+        train_client=train_client,
+        examples=training_examples,
+        epochs=cfg.distillation.epochs,
+        batch_size=cfg.distillation.batch_size,
+        learning_rate=cfg.distillation.learning_rate,
+        warmup_ratio=cfg.distillation.warmup_ratio,
+        weight_decay=cfg.distillation.weight_decay,
+        grad_clip_norm=cfg.distillation.grad_clip,
+        max_consecutive_failures=cfg.runtime.max_consecutive_failures,
+        stage="fsdp",
+    )
+    checkpoint = _save_training_checkpoints(
         service=service,
-        checkpoint_path=prior_checkpoint,
+        train_client=train_client,
+        run_id=run_id,
         stage="fsdp",
         poll_interval_seconds=cfg.runtime.real_poll_interval_seconds,
         timeout_seconds=cfg.runtime.real_poll_timeout_seconds,
-        user_metadata={"stage": "fsdp", "pipeline": "inference-projects"},
     )
+    eval_prompts = prompts[: min(8, len(prompts))]
     sampled = sample_prompts(
         service=service,
-        prompts=[row.prompt for row in prompts],
-        prompt_rows=prompts,
+        prompts=[row.prompt for row in eval_prompts],
+        prompt_rows=eval_prompts,
         stage="fsdp",
         model_label="teacher",
         model_path=checkpoint.sampler_checkpoint_path,
-        max_tokens=20,
+        max_tokens=cfg.evaluation.max_tokens_eval,
         seed=cfg.seed,
         retry_config=retry_config,
         max_consecutive_failures=cfg.runtime.max_consecutive_failures,
     )
 
     prior_quality = float(teacher_payload.get("quality_score", 0.70))
-    quality_score = round(min(0.98, prior_quality + 0.01), 4)
-    stability_score = 0.90
+    overlap_scores = [_score_overlap(out, row.reference) for out, row in zip(sampled.outputs, eval_prompts)]
+    sampled_quality = _mean(overlap_scores)
+    quality_score = round(max(prior_quality, sampled_quality), 4)
+    fsdp_nan_events = int(training["nan_events"])
+    stability_score = round(max(0.0, 1.0 - (fsdp_nan_events / max(1, int(training["steps"])))), 4)
 
     return {
         "payload": {
@@ -804,20 +826,35 @@ def run_real_fsdp(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> 
             "rl_stability_score": float(teacher_payload.get("rl_stability_score", 0.92)),
             "rl_nan_events": int(teacher_payload.get("rl_nan_events", 0)),
             "fsdp_stability_score": stability_score,
-            "fsdp_nan_events": 0,
-            "notes": "Real FSDP stage checkpointed via Tinker continuation workflow.",
+            "fsdp_nan_events": fsdp_nan_events,
+            "training": {
+                "steps": int(training["steps"]),
+                "batches_per_epoch": int(training["batches_per_epoch"]),
+                "epochs": cfg.distillation.epochs,
+                "batch_size": cfg.distillation.batch_size,
+                "learning_rate": cfg.distillation.learning_rate,
+                "warmup_ratio": cfg.distillation.warmup_ratio,
+                "weight_decay": cfg.distillation.weight_decay,
+                "grad_clip_norm": cfg.distillation.grad_clip,
+                "loss_trace": list(training["loss_trace"]),
+                "train_examples": len(training_examples),
+                "source_checkpoint_path": prior_checkpoint,
+            },
+            "notes": "Real FSDP stage resumed with optimizer state and completed iterative training.",
             PROMPT_TRACES_KEY: sampled.trace_rows,
         },
         "usage": _usage_dict(
             prefill_tokens=sampled.prefill_tokens,
             sample_tokens=sampled.sample_tokens,
-            train_tokens=0,
+            train_tokens=int(training["train_tokens"]),
             run_id=checkpoint.run_id,
             provider_raw={
                 "source_checkpoint_path": prior_checkpoint,
                 "checkpoint_path": checkpoint.checkpoint_path,
                 "sampler_checkpoint_path": checkpoint.sampler_checkpoint_path,
                 "sampling_session_id": sampled.session_id,
+                "training_steps": int(training["steps"]),
+                "training_loss_trace_count": len(training["loss_trace"]),
                 "stage": "fsdp",
             },
         ),
