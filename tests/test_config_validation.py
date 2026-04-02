@@ -38,6 +38,9 @@ def test_real_canary_config_loads_successfully():
     assert cfg.runtime.real_poll_interval_seconds == 15
     assert cfg.runtime.real_poll_timeout_seconds == 3600
     assert cfg.evaluation.prompt_limit == 150
+    assert cfg.evaluation.max_concurrency > 0
+    assert cfg.evaluation.batch_size > 0
+    assert cfg.evaluation.max_tokens_eval > 0
     assert cfg.campaign.seeds == (17, 29, 43)
 
 

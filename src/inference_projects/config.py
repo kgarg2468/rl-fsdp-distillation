@@ -45,6 +45,11 @@ class RuntimeConfig:
 class EvaluationConfig:
     prompt_file: Path
     prompt_limit: int
+    max_concurrency: int
+    batch_size: int
+    max_tokens_eval: int
+    teacher_integrity_refusal_threshold: float
+    teacher_integrity_min_score: float
 
 
 @dataclass(frozen=True)
@@ -101,6 +106,16 @@ def _validate_runtime(runtime: RuntimeConfig) -> None:
 def _validate_evaluation(evaluation: EvaluationConfig) -> None:
     if evaluation.prompt_limit <= 0:
         raise ValueError("evaluation.prompt_limit must be > 0")
+    if evaluation.max_concurrency <= 0:
+        raise ValueError("evaluation.max_concurrency must be > 0")
+    if evaluation.batch_size <= 0:
+        raise ValueError("evaluation.batch_size must be > 0")
+    if evaluation.max_tokens_eval <= 0:
+        raise ValueError("evaluation.max_tokens_eval must be > 0")
+    if not (0.0 <= evaluation.teacher_integrity_refusal_threshold <= 1.0):
+        raise ValueError("evaluation.teacher_integrity_refusal_threshold must be in [0, 1]")
+    if not (0.0 <= evaluation.teacher_integrity_min_score <= 1.0):
+        raise ValueError("evaluation.teacher_integrity_min_score must be in [0, 1]")
 
 
 def _validate_campaign(campaign: CampaignConfig) -> None:
@@ -165,6 +180,13 @@ def load_config(path: Path | str = Path("config/default.toml")) -> ProjectConfig
     evaluation = EvaluationConfig(
         prompt_file=_resolve_path(config_path, str(evaluation_raw.get("prompt_file", default_prompt_file))),
         prompt_limit=int(evaluation_raw.get("prompt_limit", 150)),
+        max_concurrency=int(evaluation_raw.get("max_concurrency", 6)),
+        batch_size=int(evaluation_raw.get("batch_size", 24)),
+        max_tokens_eval=int(evaluation_raw.get("max_tokens_eval", 24)),
+        teacher_integrity_refusal_threshold=float(
+            evaluation_raw.get("teacher_integrity_refusal_threshold", 0.30)
+        ),
+        teacher_integrity_min_score=float(evaluation_raw.get("teacher_integrity_min_score", 0.10)),
     )
     _validate_evaluation(evaluation)
     campaign_raw = data.get("campaign", {})

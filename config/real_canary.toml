@@ -47,6 +47,11 @@ real_poll_timeout_seconds = 3600
 [evaluation]
 prompt_file = "src/inference_projects/fixtures/real_eval_prompts_150.jsonl"
 prompt_limit = 150
+max_concurrency = 6
+batch_size = 24
+max_tokens_eval = 24
+teacher_integrity_refusal_threshold = 0.30
+teacher_integrity_min_score = 0.10
 
 [campaign]
 seeds = [17, 29, 43]

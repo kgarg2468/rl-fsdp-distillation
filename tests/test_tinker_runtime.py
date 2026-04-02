@@ -2,6 +2,10 @@ from inference_projects.config import load_config
 from inference_projects.tinker_runtime import (
     CANARY_FIXTURE_PATH,
     _cost_per_1k,
+    _exact_numeric_match,
+    _is_refusal_like,
+    _model_health,
+    _numeric_parse_rate,
     _sampling_model_path_candidates,
     continue_from_checkpoint,
     create_lora_checkpoint,
@@ -40,6 +44,20 @@ def test_sampling_model_path_candidates_adds_sampler_weights_variant():
 def test_sampling_model_path_candidates_does_not_duplicate_sampler_weights():
     candidates = _sampling_model_path_candidates("tinker://run-1/sampler_weights/checkpoint-001")
     assert candidates == ["tinker://run-1/sampler_weights/checkpoint-001"]
+
+
+def test_exact_numeric_match_and_parse_rate():
+    assert _exact_numeric_match("answer: 12", "12") == 1.0
+    assert _exact_numeric_match("answer: 13", "12") == 0.0
+    assert _numeric_parse_rate("value 42") == 1.0
+    assert _numeric_parse_rate("no number present") == 0.0
+
+
+def test_refusal_detection_and_model_health():
+    assert _is_refusal_like("Sorry, I cannot comply.")
+    health = _model_health(["", "No words.", "42"])
+    assert health["empty_output_rate"] == 0.3333
+    assert health["refusal_rate"] >= 0.3333
 
 
 def test_create_lora_checkpoint_uses_sampler_weights_save(monkeypatch):

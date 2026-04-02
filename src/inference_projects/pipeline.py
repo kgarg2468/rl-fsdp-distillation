@@ -247,6 +247,7 @@ def run_campaign(
     run_rows: list[list[dict[str, Any]]] = []
     run_summaries: list[dict[str, Any]] = []
     early_stop = {"triggered": False, "evaluated_after_runs": 0, "checks": {}}
+    campaign_status = "ok"
     planned_seeds = list(cfg.campaign.seeds)[: cfg.campaign.max_runs]
 
     for seed in planned_seeds:
@@ -326,6 +327,29 @@ def run_campaign(
                 bootstrap_reps=run_cfg.campaign.bootstrap_reps,
                 rng_seed=seed,
             )
+            eval_metrics = _read_json(run_paths.eval_metrics)
+            integrity = eval_metrics.get("integrity", {})
+            integrity_passed = bool(integrity.get("passed", True))
+            run_summary["integrity"] = {
+                "passed": integrity_passed,
+                "status": str(integrity.get("status", "ok")),
+                "reason": str(integrity.get("reason", "")),
+                "checks": dict(integrity.get("checks", {})) if isinstance(integrity.get("checks"), dict) else {},
+            }
+            teacher_minus_baseline = float(run_summary["metrics"]["means"]["teacher"] - run_summary["metrics"]["means"]["baseline"])
+            acceptance_checks = {
+                "teacher_vs_baseline_margin_min_0_05": teacher_minus_baseline >= 0.05,
+                "eval_duration_under_720_seconds": float(stage_durations.get("eval", 0.0)) < 720.0,
+                "integrity_passed": integrity_passed,
+            }
+            run_summary["acceptance_checks"] = acceptance_checks
+            if not integrity_passed:
+                campaign_status = "needs_debug"
+                stop_reason = (
+                    f"Stopped after seed {seed} due to quality integrity failure: "
+                    f"{run_summary['integrity']['reason'] or 'integrity checks failed'}."
+                )
+                run_halted = True
 
         run_summaries.append(run_summary)
 
@@ -334,6 +358,13 @@ def run_campaign(
 
         complete_metric_runs = [run for run in run_summaries if "metrics" in run]
         if len(complete_metric_runs) == 2 and run_cfg.campaign.min_runs <= 2:
+            if not all(bool(run.get("integrity", {}).get("passed", False)) for run in complete_metric_runs):
+                early_stop = {
+                    "triggered": False,
+                    "evaluated_after_runs": 2,
+                    "checks": {"blocked_by_integrity": True},
+                }
+                continue
             decision = campaign_utils.should_early_stop_after_two_runs(
                 first=complete_metric_runs[0]["metrics"],
                 second=complete_metric_runs[1]["metrics"],
@@ -363,6 +394,7 @@ def run_campaign(
     summary: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "mode": mode,
+        "campaign_status": campaign_status,
         "planned_seeds": planned_seeds,
         "executed_seeds": [run["seed"] for run in run_summaries],
         "frozen_prompts": frozen_info.as_dict(),
@@ -382,6 +414,24 @@ def run_campaign(
         },
         "stop_reason": stop_reason,
     }
+    quality_checks = {
+        "teacher_vs_baseline_margin_min_0_05_all_runs": all(
+            bool(run.get("acceptance_checks", {}).get("teacher_vs_baseline_margin_min_0_05"))
+            for run in run_summaries
+            if "acceptance_checks" in run
+        ),
+        "eval_duration_under_720_seconds_all_runs": all(
+            bool(run.get("acceptance_checks", {}).get("eval_duration_under_720_seconds"))
+            for run in run_summaries
+            if "acceptance_checks" in run
+        ),
+        "integrity_passed_all_runs": all(
+            bool(run.get("integrity", {}).get("passed", False))
+            for run in run_summaries
+            if "integrity" in run
+        ),
+    }
+    summary["acceptance_checks"] = quality_checks
 
     report_path = campaign_dir / "campaign_report.md"
     summary_path = campaign_dir / "campaign_summary.json"

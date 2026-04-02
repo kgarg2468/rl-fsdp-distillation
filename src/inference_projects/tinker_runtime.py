@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -16,6 +17,15 @@ REAL_USAGE_KEY = "_usage"
 PROMPT_TRACES_KEY = "_prompt_traces"
 EVAL_ROWS_KEY = "_eval_rows"
 CANARY_FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "real_eval_prompts.jsonl"
+REFUSAL_PATTERNS = (
+    "no words",
+    "i can't",
+    "i cannot",
+    "cannot comply",
+    "sorry",
+    "as an ai",
+    "i'm unable",
+)
 
 
 @dataclass(frozen=True)
@@ -209,22 +219,7 @@ def _sampling_model_path_candidates(model_path: str) -> list[str]:
     return candidates
 
 
-def sample_prompts(
-    *,
-    service: ServiceClient,
-    prompts: list[str],
-    prompt_rows: list[PromptRow] | None = None,
-    stage: str = "",
-    model_label: str = "",
-    base_model: str | None = None,
-    model_path: str | None = None,
-    max_tokens: int = 24,
-    seed: int = 42,
-    temperature: float = 0.2,
-) -> SamplingBatch:
-    if prompt_rows is not None and len(prompt_rows) != len(prompts):
-        raise ValueError("prompt_rows length must match prompts length")
-
+def _create_sampler(*, service: ServiceClient, model_path: str | None, base_model: str | None):
     if model_path:
         sampler = None
         last_error: Exception | None = None
@@ -240,70 +235,130 @@ def sample_prompts(
             if last_error is not None:
                 raise last_error
             raise RuntimeError("Failed to initialize sampling client from model_path")
-    elif base_model:
-        sampler = service.create_sampling_client(base_model=base_model)
-    else:
-        raise ValueError("Either base_model or model_path must be provided")
+        return sampler
+    if base_model:
+        return service.create_sampling_client(base_model=base_model)
+    raise ValueError("Either base_model or model_path must be provided")
 
-    tokenizer = sampler.get_tokenizer()
-    outputs: list[str] = []
+
+def sample_prompts(
+    *,
+    service: ServiceClient,
+    prompts: list[str],
+    prompt_rows: list[PromptRow] | None = None,
+    stage: str = "",
+    model_label: str = "",
+    base_model: str | None = None,
+    model_path: str | None = None,
+    max_tokens: int = 24,
+    seed: int = 42,
+    temperature: float = 0.2,
+    max_concurrency: int = 1,
+    batch_size: int | None = None,
+) -> SamplingBatch:
+    if prompt_rows is not None and len(prompt_rows) != len(prompts):
+        raise ValueError("prompt_rows length must match prompts length")
+    if max_concurrency <= 0:
+        raise ValueError("max_concurrency must be > 0")
+    if batch_size is not None and batch_size <= 0:
+        raise ValueError("batch_size must be > 0")
+
+    indexed_prompts = list(enumerate(prompts))
+    outputs: list[str] = [""] * len(prompts)
     prefill_tokens = 0
     sample_tokens = 0
-    trace_rows: list[dict[str, object]] = []
+    trace_by_index: dict[int, dict[str, object]] = {}
+    session_ids: list[str] = []
 
-    for idx, prompt in enumerate(prompts):
-        prompt_ids = tokenizer.encode(prompt)
-        prefill_count = len(prompt_ids)
-        prefill_tokens += prefill_count
-        response = sampler.sample(
-            prompt=ModelInput.from_ints(prompt_ids),
-            num_samples=1,
-            sampling_params=SamplingParams(max_tokens=max_tokens, seed=seed, temperature=temperature),
-        ).result()
-        if not response.sequences:
-            outputs.append("")
+    chunk_size = batch_size or len(indexed_prompts) or 1
+    chunks: list[list[tuple[int, str]]] = [
+        indexed_prompts[i : i + chunk_size] for i in range(0, len(indexed_prompts), chunk_size)
+    ]
+
+    def process_chunk(chunk: list[tuple[int, str]]) -> tuple[int, int, list[tuple[int, str]], list[tuple[int, dict[str, object]]], str | None]:
+        chunk_outputs: list[tuple[int, str]] = []
+        chunk_traces: list[tuple[int, dict[str, object]]] = []
+        chunk_prefill = 0
+        chunk_sample = 0
+
+        chunk_service = build_service_client() if max_concurrency > 1 else service
+        sampler = _create_sampler(service=chunk_service, model_path=model_path, base_model=base_model)
+        tokenizer = sampler.get_tokenizer()
+
+        for idx, prompt in chunk:
+            prompt_ids = tokenizer.encode(prompt)
+            prefill_count = len(prompt_ids)
+            chunk_prefill += prefill_count
+            response = sampler.sample(
+                prompt=ModelInput.from_ints(prompt_ids),
+                num_samples=1,
+                sampling_params=SamplingParams(max_tokens=max_tokens, seed=seed + idx, temperature=temperature),
+            ).result()
             sample_count = 0
             output_text = ""
-            row = prompt_rows[idx] if prompt_rows is not None else PromptRow(row_id=f"row-{idx + 1}", prompt=prompt, reference="")
-            trace_rows.append(
-                {
-                    "row_id": row.row_id,
-                    "prompt": prompt,
-                    "reference": row.reference,
-                    "output": output_text,
-                    "prefill_tokens": prefill_count,
-                    "sample_tokens": sample_count,
-                    "stage": stage,
-                    "model_label": model_label,
-                }
+            if response.sequences:
+                sampled = response.sequences[0]
+                token_ids = list(sampled.tokens)
+                sample_count = len(token_ids)
+                chunk_sample += sample_count
+                output_text = tokenizer.decode(token_ids).strip()
+            row = (
+                prompt_rows[idx]
+                if prompt_rows is not None
+                else PromptRow(row_id=f"row-{idx + 1}", prompt=prompt, reference="")
             )
-            continue
-        sampled = response.sequences[0]
-        token_ids = list(sampled.tokens)
-        sample_count = len(token_ids)
-        sample_tokens += sample_count
-        output_text = tokenizer.decode(token_ids).strip()
-        outputs.append(output_text)
-        row = prompt_rows[idx] if prompt_rows is not None else PromptRow(row_id=f"row-{idx + 1}", prompt=prompt, reference="")
-        trace_rows.append(
-            {
-                "row_id": row.row_id,
-                "prompt": prompt,
-                "reference": row.reference,
-                "output": output_text,
-                "prefill_tokens": prefill_count,
-                "sample_tokens": sample_count,
-                "stage": stage,
-                "model_label": model_label,
-            }
-        )
+            chunk_outputs.append((idx, output_text))
+            chunk_traces.append(
+                (
+                    idx,
+                    {
+                        "row_id": row.row_id,
+                        "prompt": prompt,
+                        "reference": row.reference,
+                        "output": output_text,
+                        "prefill_tokens": prefill_count,
+                        "sample_tokens": sample_count,
+                        "stage": stage,
+                        "model_label": model_label,
+                    },
+                )
+            )
+        session_id = getattr(sampler, "_sampling_session_id", None)
+        return chunk_prefill, chunk_sample, chunk_outputs, chunk_traces, str(session_id) if session_id else None
 
-    session_id = getattr(sampler, "_sampling_session_id", None)
+    if max_concurrency == 1 or len(chunks) == 1:
+        for chunk in chunks:
+            chunk_prefill, chunk_sample, chunk_outputs, chunk_traces, chunk_session_id = process_chunk(chunk)
+            prefill_tokens += chunk_prefill
+            sample_tokens += chunk_sample
+            for idx, text in chunk_outputs:
+                outputs[idx] = text
+            for idx, trace in chunk_traces:
+                trace_by_index[idx] = trace
+            if chunk_session_id:
+                session_ids.append(chunk_session_id)
+    else:
+        max_workers = min(max_concurrency, len(chunks))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for chunk_prefill, chunk_sample, chunk_outputs, chunk_traces, chunk_session_id in executor.map(
+                process_chunk, chunks
+            ):
+                prefill_tokens += chunk_prefill
+                sample_tokens += chunk_sample
+                for idx, text in chunk_outputs:
+                    outputs[idx] = text
+                for idx, trace in chunk_traces:
+                    trace_by_index[idx] = trace
+                if chunk_session_id:
+                    session_ids.append(chunk_session_id)
+
+    trace_rows = [trace_by_index[i] for i in range(len(prompts))]
+    session_id = ",".join(session_ids) if session_ids else None
     return SamplingBatch(
         outputs=outputs,
         prefill_tokens=prefill_tokens,
         sample_tokens=sample_tokens,
-        session_id=str(session_id) if session_id else None,
+        session_id=session_id,
         trace_rows=trace_rows,
     )
 
@@ -314,6 +369,50 @@ def _score_overlap(output: str, reference: str) -> float:
     if not ref_tokens:
         return 0.0
     return len(ref_tokens & out_tokens) / len(ref_tokens)
+
+
+def _extract_first_int(text: str) -> int | None:
+    match = re.search(r"-?\d+", text)
+    if match is None:
+        return None
+    try:
+        return int(match.group(0))
+    except ValueError:
+        return None
+
+
+def _is_refusal_like(text: str) -> bool:
+    lowered = text.lower()
+    return any(pattern in lowered for pattern in REFUSAL_PATTERNS)
+
+
+def _exact_numeric_match(output: str, reference: str) -> float:
+    out_num = _extract_first_int(output)
+    ref_num = _extract_first_int(reference)
+    if out_num is None or ref_num is None:
+        return 0.0
+    return 1.0 if out_num == ref_num else 0.0
+
+
+def _numeric_parse_rate(output: str) -> float:
+    return 1.0 if _extract_first_int(output) is not None else 0.0
+
+
+def _model_health(outputs: list[str]) -> dict[str, float]:
+    if not outputs:
+        return {
+            "empty_output_rate": 0.0,
+            "refusal_rate": 0.0,
+            "avg_output_chars": 0.0,
+        }
+    empty_count = sum(1 for output in outputs if not output.strip())
+    refusal_count = sum(1 for output in outputs if _is_refusal_like(output))
+    avg_chars = _mean([float(len(output)) for output in outputs])
+    return {
+        "empty_output_rate": round(empty_count / len(outputs), 4),
+        "refusal_rate": round(refusal_count / len(outputs), 4),
+        "avg_output_chars": round(avg_chars, 2),
+    }
 
 
 def _mean(values: list[float]) -> float:
@@ -579,8 +678,10 @@ def run_real_eval(
         stage="eval",
         model_label="baseline",
         base_model=cfg.baseline_model,
-        max_tokens=24,
+        max_tokens=cfg.evaluation.max_tokens_eval,
         seed=cfg.seed,
+        max_concurrency=cfg.evaluation.max_concurrency,
+        batch_size=cfg.evaluation.batch_size,
     )
     teacher = sample_prompts(
         service=service,
@@ -590,8 +691,10 @@ def run_real_eval(
         model_label="teacher",
         model_path=teacher_checkpoint_path if teacher_checkpoint_path else None,
         base_model=None if teacher_checkpoint_path else cfg.teacher_model,
-        max_tokens=24,
+        max_tokens=cfg.evaluation.max_tokens_eval,
         seed=cfg.seed,
+        max_concurrency=cfg.evaluation.max_concurrency,
+        batch_size=cfg.evaluation.batch_size,
     )
     student = sample_prompts(
         service=service,
@@ -601,17 +704,31 @@ def run_real_eval(
         model_label="student",
         model_path=student_checkpoint_path if student_checkpoint_path else None,
         base_model=None if student_checkpoint_path else cfg.student_model,
-        max_tokens=24,
+        max_tokens=cfg.evaluation.max_tokens_eval,
         seed=cfg.seed,
+        max_concurrency=cfg.evaluation.max_concurrency,
+        batch_size=cfg.evaluation.batch_size,
     )
 
     baseline_scores = [_score_overlap(out, ref) for out, ref in zip(baseline.outputs, references)]
     teacher_scores = [_score_overlap(out, ref) for out, ref in zip(teacher.outputs, references)]
     student_scores = [_score_overlap(out, ref) for out, ref in zip(student.outputs, references)]
+    baseline_exact_matches = [_exact_numeric_match(out, ref) for out, ref in zip(baseline.outputs, references)]
+    teacher_exact_matches = [_exact_numeric_match(out, ref) for out, ref in zip(teacher.outputs, references)]
+    student_exact_matches = [_exact_numeric_match(out, ref) for out, ref in zip(student.outputs, references)]
+    baseline_parse_rates = [_numeric_parse_rate(out) for out in baseline.outputs]
+    teacher_parse_rates = [_numeric_parse_rate(out) for out in teacher.outputs]
+    student_parse_rates = [_numeric_parse_rate(out) for out in student.outputs]
 
     baseline_quality = round(_mean(baseline_scores), 4)
     teacher_quality = round(_mean(teacher_scores), 4)
     student_quality = round(_mean(student_scores), 4)
+    baseline_exact_match = round(_mean(baseline_exact_matches), 4)
+    teacher_exact_match = round(_mean(teacher_exact_matches), 4)
+    student_exact_match = round(_mean(student_exact_matches), 4)
+    baseline_numeric_parse = round(_mean(baseline_parse_rates), 4)
+    teacher_numeric_parse = round(_mean(teacher_parse_rates), 4)
+    student_numeric_parse = round(_mean(student_parse_rates), 4)
 
     student_vs_baseline_wins = [1.0 if s > b else 0.0 for s, b in zip(student_scores, baseline_scores)]
     student_vs_teacher_wins = [1.0 if s > t else 0.0 for s, t in zip(student_scores, teacher_scores)]
@@ -638,9 +755,48 @@ def run_real_eval(
     distill_stability = float(
         student_payload.get("distill_stability_score", student_payload.get("stability_score", 0.87))
     )
+    health = {
+        "baseline": _model_health(baseline.outputs),
+        "teacher": _model_health(teacher.outputs),
+        "student": _model_health(student.outputs),
+    }
+    teacher_integrity_failed = (
+        health["teacher"]["refusal_rate"] >= cfg.evaluation.teacher_integrity_refusal_threshold
+        or (
+            teacher_quality <= cfg.evaluation.teacher_integrity_min_score
+            and baseline_quality >= max(0.30, cfg.evaluation.teacher_integrity_min_score + 0.20)
+        )
+    )
+    integrity_reason = ""
+    if teacher_integrity_failed:
+        if health["teacher"]["refusal_rate"] >= cfg.evaluation.teacher_integrity_refusal_threshold:
+            integrity_reason = (
+                "teacher refusal rate "
+                f"{health['teacher']['refusal_rate']:.4f} exceeded threshold "
+                f"{cfg.evaluation.teacher_integrity_refusal_threshold:.4f}"
+            )
+        else:
+            integrity_reason = (
+                "teacher overlap near-zero while baseline remained strong "
+                f"(teacher={teacher_quality:.4f}, baseline={baseline_quality:.4f})"
+            )
 
     eval_rows: list[dict[str, object]] = []
-    for row, baseline_output, teacher_output, student_output, baseline_overlap, teacher_overlap, student_overlap in zip(
+    for (
+        row,
+        baseline_output,
+        teacher_output,
+        student_output,
+        baseline_overlap,
+        teacher_overlap,
+        student_overlap,
+        baseline_exact,
+        teacher_exact,
+        student_exact,
+        baseline_parse,
+        teacher_parse,
+        student_parse,
+    ) in zip(
         prompts,
         baseline.outputs,
         teacher.outputs,
@@ -648,6 +804,12 @@ def run_real_eval(
         baseline_scores,
         teacher_scores,
         student_scores,
+        baseline_exact_matches,
+        teacher_exact_matches,
+        student_exact_matches,
+        baseline_parse_rates,
+        teacher_parse_rates,
+        student_parse_rates,
     ):
         eval_rows.append(
             {
@@ -660,6 +822,12 @@ def run_real_eval(
                 "baseline_overlap": round(baseline_overlap, 4),
                 "teacher_overlap": round(teacher_overlap, 4),
                 "student_overlap": round(student_overlap, 4),
+                "baseline_exact_match": round(baseline_exact, 4),
+                "teacher_exact_match": round(teacher_exact, 4),
+                "student_exact_match": round(student_exact, 4),
+                "baseline_numeric_parse": round(baseline_parse, 4),
+                "teacher_numeric_parse": round(teacher_parse, 4),
+                "student_numeric_parse": round(student_parse, 4),
                 "student_vs_baseline_win": 1.0 if student_overlap > baseline_overlap else 0.0,
                 "student_vs_teacher_win": 1.0 if student_overlap > teacher_overlap else 0.0,
             }
@@ -682,6 +850,20 @@ def run_real_eval(
                     "student_vs_baseline_win_rate": round(_mean(student_vs_baseline_wins), 4),
                     "student_vs_teacher_win_rate": round(_mean(student_vs_teacher_wins), 4),
                 },
+                "sanity": {
+                    "exact_match_rate": {
+                        "baseline": baseline_exact_match,
+                        "teacher": teacher_exact_match,
+                        "student": student_exact_match,
+                        "teacher_minus_baseline_exact_match": round(teacher_exact_match - baseline_exact_match, 4),
+                        "student_minus_baseline_exact_match": round(student_exact_match - baseline_exact_match, 4),
+                    },
+                    "numeric_parse_rate": {
+                        "baseline": baseline_numeric_parse,
+                        "teacher": teacher_numeric_parse,
+                        "student": student_numeric_parse,
+                    },
+                },
             },
             "cost": {
                 "inference_usd_per_1k_tokens": {
@@ -703,6 +885,24 @@ def run_real_eval(
                 "distill": {
                     "stability_score": distill_stability,
                     "nan_events": int(student_payload.get("distill_nan_events", 0)),
+                },
+            },
+            "integrity": {
+                "passed": not teacher_integrity_failed,
+                "status": "ok" if not teacher_integrity_failed else "integrity_failed",
+                "reason": integrity_reason,
+                "checks": {
+                    "teacher_refusal_rate": health["teacher"]["refusal_rate"],
+                    "teacher_refusal_threshold": cfg.evaluation.teacher_integrity_refusal_threshold,
+                    "teacher_overlap_score": teacher_quality,
+                    "teacher_min_score": cfg.evaluation.teacher_integrity_min_score,
+                    "baseline_overlap_score": baseline_quality,
+                    "prompt_count": len(prompts),
+                },
+                "diagnostics": {
+                    "baseline": health["baseline"],
+                    "teacher": health["teacher"],
+                    "student": health["student"],
                 },
             },
             "notes": "Real eval stage executed across baseline, teacher, and student checkpoints.",

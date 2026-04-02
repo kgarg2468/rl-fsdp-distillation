@@ -74,6 +74,14 @@ def summarize_eval_rows(
     student = [float(row["student_overlap"]) for row in eval_rows]
     delta = [s - b for s, b in zip(student, baseline)]
     ratio = [_safe_ratio(s, t) for s, t in zip(student, teacher)]
+    baseline_exact = [float(row.get("baseline_exact_match", 0.0)) for row in eval_rows]
+    teacher_exact = [float(row.get("teacher_exact_match", 0.0)) for row in eval_rows]
+    student_exact = [float(row.get("student_exact_match", 0.0)) for row in eval_rows]
+    teacher_minus_baseline_exact = [t - b for t, b in zip(teacher_exact, baseline_exact)]
+    student_minus_baseline_exact = [s - b for s, b in zip(student_exact, baseline_exact)]
+    baseline_parse = [float(row.get("baseline_numeric_parse", 0.0)) for row in eval_rows]
+    teacher_parse = [float(row.get("teacher_numeric_parse", 0.0)) for row in eval_rows]
+    student_parse = [float(row.get("student_numeric_parse", 0.0)) for row in eval_rows]
 
     return {
         "rows": len(eval_rows),
@@ -83,6 +91,14 @@ def summarize_eval_rows(
             "student": round(_mean(student), 6),
             "student_minus_baseline": round(_mean(delta), 6),
             "student_teacher_ratio": round(_mean(ratio), 6),
+            "baseline_exact_match": round(_mean(baseline_exact), 6),
+            "teacher_exact_match": round(_mean(teacher_exact), 6),
+            "student_exact_match": round(_mean(student_exact), 6),
+            "teacher_minus_baseline_exact_match": round(_mean(teacher_minus_baseline_exact), 6),
+            "student_minus_baseline_exact_match": round(_mean(student_minus_baseline_exact), 6),
+            "baseline_numeric_parse_rate": round(_mean(baseline_parse), 6),
+            "teacher_numeric_parse_rate": round(_mean(teacher_parse), 6),
+            "student_numeric_parse_rate": round(_mean(student_parse), 6),
         },
         "ci95": {
             "baseline": _round_pair(bootstrap_mean_ci(baseline, reps=bootstrap_reps, rng_seed=rng_seed + 11)),
@@ -94,6 +110,21 @@ def summarize_eval_rows(
             "student_teacher_ratio": _round_pair(
                 bootstrap_mean_ci(ratio, reps=bootstrap_reps, rng_seed=rng_seed + 37)
             ),
+            "baseline_exact_match": _round_pair(
+                bootstrap_mean_ci(baseline_exact, reps=bootstrap_reps, rng_seed=rng_seed + 41)
+            ),
+            "teacher_exact_match": _round_pair(
+                bootstrap_mean_ci(teacher_exact, reps=bootstrap_reps, rng_seed=rng_seed + 43)
+            ),
+            "student_exact_match": _round_pair(
+                bootstrap_mean_ci(student_exact, reps=bootstrap_reps, rng_seed=rng_seed + 47)
+            ),
+            "teacher_minus_baseline_exact_match": _round_pair(
+                bootstrap_mean_ci(teacher_minus_baseline_exact, reps=bootstrap_reps, rng_seed=rng_seed + 53)
+            ),
+            "student_minus_baseline_exact_match": _round_pair(
+                bootstrap_mean_ci(student_minus_baseline_exact, reps=bootstrap_reps, rng_seed=rng_seed + 59)
+            ),
         },
     }
 
@@ -104,6 +135,18 @@ def summarize_across_runs(run_summaries: list[dict[str, object]]) -> dict[str, o
     delta = [float(run["means"]["student_minus_baseline"]) for run in run_summaries]
     teacher = [float(run["means"]["teacher"]) for run in run_summaries]
     ratio = [float(run["means"]["student_teacher_ratio"]) for run in run_summaries]
+    baseline_exact = [float(run["means"].get("baseline_exact_match", 0.0)) for run in run_summaries]
+    teacher_exact = [float(run["means"].get("teacher_exact_match", 0.0)) for run in run_summaries]
+    student_exact = [float(run["means"].get("student_exact_match", 0.0)) for run in run_summaries]
+    teacher_minus_baseline_exact = [
+        float(run["means"].get("teacher_minus_baseline_exact_match", 0.0)) for run in run_summaries
+    ]
+    student_minus_baseline_exact = [
+        float(run["means"].get("student_minus_baseline_exact_match", 0.0)) for run in run_summaries
+    ]
+    baseline_parse = [float(run["means"].get("baseline_numeric_parse_rate", 0.0)) for run in run_summaries]
+    teacher_parse = [float(run["means"].get("teacher_numeric_parse_rate", 0.0)) for run in run_summaries]
+    student_parse = [float(run["means"].get("student_numeric_parse_rate", 0.0)) for run in run_summaries]
     return {
         "runs": len(run_summaries),
         "mean": {
@@ -112,6 +155,14 @@ def summarize_across_runs(run_summaries: list[dict[str, object]]) -> dict[str, o
             "student": round(_mean(student), 6),
             "student_minus_baseline": round(_mean(delta), 6),
             "student_teacher_ratio": round(_mean(ratio), 6),
+            "baseline_exact_match": round(_mean(baseline_exact), 6),
+            "teacher_exact_match": round(_mean(teacher_exact), 6),
+            "student_exact_match": round(_mean(student_exact), 6),
+            "teacher_minus_baseline_exact_match": round(_mean(teacher_minus_baseline_exact), 6),
+            "student_minus_baseline_exact_match": round(_mean(student_minus_baseline_exact), 6),
+            "baseline_numeric_parse_rate": round(_mean(baseline_parse), 6),
+            "teacher_numeric_parse_rate": round(_mean(teacher_parse), 6),
+            "student_numeric_parse_rate": round(_mean(student_parse), 6),
         },
         "std": {
             "baseline": round(_std(baseline), 6),
@@ -119,6 +170,14 @@ def summarize_across_runs(run_summaries: list[dict[str, object]]) -> dict[str, o
             "student": round(_std(student), 6),
             "student_minus_baseline": round(_std(delta), 6),
             "student_teacher_ratio": round(_std(ratio), 6),
+            "baseline_exact_match": round(_std(baseline_exact), 6),
+            "teacher_exact_match": round(_std(teacher_exact), 6),
+            "student_exact_match": round(_std(student_exact), 6),
+            "teacher_minus_baseline_exact_match": round(_std(teacher_minus_baseline_exact), 6),
+            "student_minus_baseline_exact_match": round(_std(student_minus_baseline_exact), 6),
+            "baseline_numeric_parse_rate": round(_std(baseline_parse), 6),
+            "teacher_numeric_parse_rate": round(_std(teacher_parse), 6),
+            "student_numeric_parse_rate": round(_std(student_parse), 6),
         },
     }
 
@@ -177,6 +236,9 @@ def format_campaign_report(summary: dict[str, Any]) -> str:
     lines = [
         "# Campaign Report",
         "",
+        "## Status",
+        f"- Campaign status: {summary.get('campaign_status', 'unknown')}",
+        "",
         "## Budget",
         f"- Hard cap (USD): {summary['budget']['hard_cap_usd']:.2f}",
         f"- Prior spend (USD): {summary['budget']['prior_spend_usd']:.4f}",
@@ -217,15 +279,49 @@ def format_campaign_report(summary: dict[str, Any]) -> str:
                     f"- Teacher mean: {metrics['means']['teacher']}",
                     f"- Student mean: {metrics['means']['student']}",
                     f"- Student - Baseline mean: {metrics['means']['student_minus_baseline']}",
+                    f"- Baseline exact-match rate: {metrics['means'].get('baseline_exact_match', 'n/a')}",
+                    f"- Teacher exact-match rate: {metrics['means'].get('teacher_exact_match', 'n/a')}",
+                    f"- Student exact-match rate: {metrics['means'].get('student_exact_match', 'n/a')}",
+                    (
+                        "- Teacher - Baseline exact-match: "
+                        f"{metrics['means'].get('teacher_minus_baseline_exact_match', 'n/a')}"
+                    ),
+                    (
+                        "- Student - Baseline exact-match: "
+                        f"{metrics['means'].get('student_minus_baseline_exact_match', 'n/a')}"
+                    ),
                     (
                         "- Student - Baseline 95% CI: "
                         f"{metrics['ci95']['student_minus_baseline'][0]} .. "
                         f"{metrics['ci95']['student_minus_baseline'][1]}"
                     ),
+                    (
+                        "- Student - Baseline exact-match 95% CI: "
+                        f"{metrics['ci95'].get('student_minus_baseline_exact_match', ['n/a', 'n/a'])[0]} .. "
+                        f"{metrics['ci95'].get('student_minus_baseline_exact_match', ['n/a', 'n/a'])[1]}"
+                    ),
                 ]
             )
         else:
             lines.append("- Metrics: not available (run stopped before eval).")
+        integrity = run.get("integrity", {})
+        if isinstance(integrity, dict) and integrity:
+            lines.extend(
+                [
+                    f"- Integrity passed: {integrity.get('passed', 'n/a')}",
+                    f"- Integrity status: {integrity.get('status', 'n/a')}",
+                    f"- Integrity reason: {integrity.get('reason', '') or 'none'}",
+                ]
+            )
+        checks = run.get("acceptance_checks", {})
+        if isinstance(checks, dict) and checks:
+            lines.extend(
+                [
+                    f"- Check teacher margin >= +0.05: {checks.get('teacher_vs_baseline_margin_min_0_05', 'n/a')}",
+                    f"- Check eval duration < 720s: {checks.get('eval_duration_under_720_seconds', 'n/a')}",
+                    f"- Check integrity passed: {checks.get('integrity_passed', 'n/a')}",
+                ]
+            )
         lines.extend(
             [
                 f"- Eval report: {run['artifacts']['eval_report']}",
@@ -255,6 +351,11 @@ def format_campaign_report(summary: dict[str, Any]) -> str:
             "- Pooled Student-Baseline 95% CI: "
             f"{summary['aggregate']['pooled'].get('ci95', {}).get('student_minus_baseline', ['n/a', 'n/a'])[0]} .. "
             f"{summary['aggregate']['pooled'].get('ci95', {}).get('student_minus_baseline', ['n/a', 'n/a'])[1]}",
+            (
+                "- Pooled Student-Baseline exact-match 95% CI: "
+                f"{summary['aggregate']['pooled'].get('ci95', {}).get('student_minus_baseline_exact_match', ['n/a', 'n/a'])[0]} .. "
+                f"{summary['aggregate']['pooled'].get('ci95', {}).get('student_minus_baseline_exact_match', ['n/a', 'n/a'])[1]}"
+            ),
             "",
             "## Early Stop Decision",
             f"- Triggered: {summary['early_stop']['triggered']}",
@@ -265,6 +366,20 @@ def format_campaign_report(summary: dict[str, Any]) -> str:
                 f"{summary['early_stop']['checks'].get('student_minus_baseline_gap_abs', 'n/a')}"
             ),
             f"- Directional CI stable: {summary['early_stop']['checks'].get('directional_ci_stable', 'n/a')}",
+            "",
+            "## Acceptance Checks",
+            (
+                "- Teacher margin >= +0.05 (all runs): "
+                f"{summary.get('acceptance_checks', {}).get('teacher_vs_baseline_margin_min_0_05_all_runs', 'n/a')}"
+            ),
+            (
+                "- Eval duration < 720s (all runs): "
+                f"{summary.get('acceptance_checks', {}).get('eval_duration_under_720_seconds_all_runs', 'n/a')}"
+            ),
+            (
+                "- Integrity passed (all runs): "
+                f"{summary.get('acceptance_checks', {}).get('integrity_passed_all_runs', 'n/a')}"
+            ),
             "",
         ]
     )

@@ -91,8 +91,13 @@ class FakeRealDistill:
 class FakeRealEval:
     mode = "real"
 
-    def __init__(self, student_score_for_seed: Callable[[int], float]):
+    def __init__(
+        self,
+        student_score_for_seed: Callable[[int], float],
+        integrity_failed_for_seed: Callable[[int], bool] | None = None,
+    ):
         self._student_score_for_seed = student_score_for_seed
+        self._integrity_failed_for_seed = integrity_failed_for_seed or (lambda seed: False)
 
     def run(self, *, cfg, teacher_payload, student_payload, actual_cost_usd):
         _ = (teacher_payload, student_payload, actual_cost_usd)
@@ -146,19 +151,32 @@ class FakeRealEval:
                 "fsdp": {"stability_score": 0.89, "nan_events": 0},
                 "distill": {"stability_score": 0.88, "nan_events": 0},
             },
+            "integrity": {
+                "passed": not self._integrity_failed_for_seed(cfg.seed),
+                "status": "integrity_failed" if self._integrity_failed_for_seed(cfg.seed) else "ok",
+                "reason": "forced-failure" if self._integrity_failed_for_seed(cfg.seed) else "",
+                "checks": {"teacher_refusal_rate": 0.9 if self._integrity_failed_for_seed(cfg.seed) else 0.0},
+            },
             "_eval_rows": eval_rows,
             REAL_USAGE_KEY: _usage(stage="eval", seed=cfg.seed, cost_usd=0.0104),
         }
 
 
-def _patch_fake_real_adapters(monkeypatch: pytest.MonkeyPatch, student_score_for_seed: Callable[[int], float]) -> None:
+def _patch_fake_real_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+    student_score_for_seed: Callable[[int], float],
+    integrity_failed_for_seed: Callable[[int], bool] | None = None,
+) -> None:
     monkeypatch.setattr(
         "inference_projects.pipeline.select_stage_adapters",
         lambda mode: StageAdapters(
             rl=FakeRealRL(),
             fsdp=FakeRealFSDP(),
             distill=FakeRealDistill(),
-            eval=FakeRealEval(student_score_for_seed=student_score_for_seed),
+            eval=FakeRealEval(
+                student_score_for_seed=student_score_for_seed,
+                integrity_failed_for_seed=integrity_failed_for_seed,
+            ),
         ),
     )
 
@@ -242,3 +260,30 @@ def test_campaign_stops_for_global_budget_before_stage(tmp_path: Path, monkeypat
     assert summary is not None
     assert summary["budget"]["stopped_for_budget"] is True
     assert "exceeds hard cap" in summary["stop_reason"]
+
+
+def test_campaign_integrity_failure_sets_needs_debug_and_stops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    state_dir = tmp_path / "state"
+    prior_ledger = tmp_path / "prior_ledger.json"
+    _write_prior_ledger(prior_ledger, total_spend_usd=0.0)
+    monkeypatch.setenv("TINKER_API_KEY", "dummy")
+    monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
+    _patch_fake_real_adapters(
+        monkeypatch,
+        student_score_for_seed=lambda seed: 0.35,
+        integrity_failed_for_seed=lambda seed: seed == 17,
+    )
+
+    summary = run_pipeline_command(
+        "campaign",
+        mode="real",
+        state_dir=state_dir,
+        prior_ledger=prior_ledger,
+        project_hard_cap_usd=35.0,
+    )
+
+    assert summary is not None
+    assert summary["campaign_status"] == "needs_debug"
+    assert summary["executed_seeds"] == [17]
+    assert summary["runs"][0]["integrity"]["passed"] is False
+    assert summary["acceptance_checks"]["integrity_passed_all_runs"] is False
