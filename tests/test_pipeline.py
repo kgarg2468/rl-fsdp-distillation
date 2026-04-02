@@ -169,17 +169,15 @@ def test_real_mode_missing_usage_fails(tmp_path: Path, monkeypatch: pytest.Monke
         run_pipeline_command("rl", mode="real", state_dir=state_dir)
 
 
-def test_campaign_real_mode_requires_prior_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_campaign_runs_without_prior_ledger(tmp_path: Path):
     state_dir = tmp_path / "state"
-    monkeypatch.setenv("TINKER_API_KEY", "dummy-key")
-    monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
-    with pytest.raises(ValueError):
-        run_pipeline_command("campaign", mode="real", state_dir=state_dir, project_hard_cap_usd=35.0)
+    summary = run_pipeline_command("campaign", mode="mock", state_dir=state_dir)
+    assert summary is not None
+    assert "executed_seeds" in summary
 
 
-def test_tune_real_mode_requires_prior_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_tune_runs_without_prior_ledger(tmp_path: Path):
     state_dir = tmp_path / "state"
-    monkeypatch.setenv("TINKER_API_KEY", "dummy-key")
-    monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
-    with pytest.raises(ValueError):
-        run_pipeline_command("tune", mode="real", state_dir=state_dir, project_hard_cap_usd=35.0)
+    summary = run_pipeline_command("tune", mode="mock", state_dir=state_dir)
+    assert summary is not None
+    assert "status" in summary

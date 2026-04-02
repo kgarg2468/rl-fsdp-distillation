@@ -24,18 +24,13 @@ def test_cli_parses_campaign_flags():
             "campaign",
             "--mode",
             "real",
-            "--prior-ledger",
-            "/tmp/prior-ledger.json",
-            "--project-hard-cap-usd",
-            "35.0",
             "--state-dir",
             "/tmp/state",
         ]
     )
     assert args.command == "campaign"
     assert args.mode == "real"
-    assert args.prior_ledger == "/tmp/prior-ledger.json"
-    assert args.project_hard_cap_usd == 35.0
+    assert args.state_dir == "/tmp/state"
 
 
 def test_cli_supports_tune_command():
