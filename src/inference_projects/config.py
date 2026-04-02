@@ -10,13 +10,6 @@ REQUIRED_STAGES = ("rl", "fsdp", "distill", "eval")
 
 
 @dataclass(frozen=True)
-class BudgetConfig:
-    target_cap_usd: float
-    hard_cap_usd: float
-    stage_budgets_usd: dict[str, float]
-
-
-@dataclass(frozen=True)
 class ProjectConfig:
     name: str
     seed: int
@@ -25,7 +18,6 @@ class ProjectConfig:
     baseline_model: str
     token_rates_per_million: dict[str, float]
     token_caps: dict[str, TokenUsage]
-    budget: BudgetConfig
     runtime: "RuntimeConfig"
     evaluation: "EvaluationConfig"
     distillation: "DistillationConfig"
@@ -90,7 +82,6 @@ class TuningConfig:
     sweep_runs: int
     teacher_candidates: tuple[str, ...]
     promotion_top_k: int
-    sweep_budget_fraction: float
 
 
 def _token_caps_by_stage(raw: dict[str, int]) -> dict[str, TokenUsage]:
@@ -106,18 +97,6 @@ def _token_caps_by_stage(raw: dict[str, int]) -> dict[str, TokenUsage]:
             train=int(raw[f"{stage}_train"]),
         )
     return out
-
-
-def _validate_budget(budget: BudgetConfig) -> None:
-    if budget.target_cap_usd > budget.hard_cap_usd:
-        raise ValueError("target_cap_usd cannot be greater than hard_cap_usd")
-    for stage in REQUIRED_STAGES:
-        if stage not in budget.stage_budgets_usd:
-            raise ValueError(f"Missing stage budget for '{stage}'")
-        if budget.stage_budgets_usd[stage] <= 0:
-            raise ValueError(f"Stage budget for '{stage}' must be > 0")
-    if sum(budget.stage_budgets_usd.values()) < budget.target_cap_usd:
-        raise ValueError("Stage budgets should sum to at least target_cap_usd")
 
 
 def _validate_runtime(runtime: RuntimeConfig) -> None:
@@ -217,8 +196,6 @@ def _validate_tuning(tuning: TuningConfig) -> None:
         raise ValueError("tuning.promotion_top_k must be > 0")
     if tuning.promotion_top_k > tuning.sweep_runs:
         raise ValueError("tuning.promotion_top_k cannot exceed tuning.sweep_runs")
-    if not (0.0 < tuning.sweep_budget_fraction < 1.0):
-        raise ValueError("tuning.sweep_budget_fraction must be in (0, 1)")
 
 
 def _resolve_path(config_path: Path, raw_path: str | Path) -> Path:
@@ -235,15 +212,7 @@ def load_config(path: Path | str = Path("config/default.toml")) -> ProjectConfig
     config_path = Path(path)
     data = tomllib.loads(config_path.read_text())
     project = data["project"]
-    budget_raw = data["budget"]
     models = data["models"]
-
-    budget = BudgetConfig(
-        target_cap_usd=float(budget_raw["target_cap_usd"]),
-        hard_cap_usd=float(budget_raw["hard_cap_usd"]),
-        stage_budgets_usd={k: float(v) for k, v in data["stage_budgets_usd"].items()},
-    )
-    _validate_budget(budget)
     token_rates = {k: float(v) for k, v in data["token_rates_per_million"].items()}
     runtime_raw = data.get("runtime", {})
     runtime = RuntimeConfig(
@@ -322,11 +291,10 @@ def load_config(path: Path | str = Path("config/default.toml")) -> ProjectConfig
             str(model_name)
             for model_name in tuning_raw.get(
                 "teacher_candidates",
-                [teacher_model, "meta-llama/Llama-3.1-70B-Instruct"],
+                [teacher_model],
             )
         ),
         promotion_top_k=int(tuning_raw.get("promotion_top_k", 2)),
-        sweep_budget_fraction=float(tuning_raw.get("sweep_budget_fraction", 0.5)),
     )
     _validate_tuning(tuning)
 
@@ -338,7 +306,6 @@ def load_config(path: Path | str = Path("config/default.toml")) -> ProjectConfig
         baseline_model=baseline_model,
         token_rates_per_million=token_rates,
         token_caps=_token_caps_by_stage(data["token_caps"]),
-        budget=budget,
         runtime=runtime,
         evaluation=evaluation,
         distillation=distillation,

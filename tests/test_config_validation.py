@@ -5,24 +5,6 @@ import pytest
 from inference_projects.config import load_config
 
 
-def test_invalid_budget_caps_rejected(tmp_path: Path):
-    cfg = tmp_path / "bad.toml"
-    cfg.write_text(
-        Path("config/default.toml")
-        .read_text()
-        .replace("target_cap_usd = 25.0", "target_cap_usd = 31.0")
-    )
-    with pytest.raises(ValueError):
-        load_config(cfg)
-
-
-def test_missing_stage_budget_rejected(tmp_path: Path):
-    cfg = tmp_path / "bad_stage.toml"
-    cfg.write_text(Path("config/default.toml").read_text().replace("eval = 3.0\n", ""))
-    with pytest.raises(ValueError):
-        load_config(cfg)
-
-
 def test_invalid_real_polling_values_rejected(tmp_path: Path):
     cfg = tmp_path / "bad_runtime.toml"
     text = Path("config/default.toml").read_text()
@@ -47,7 +29,7 @@ def test_real_canary_config_loads_successfully():
     assert cfg.distillation.lora_rank == 8
     assert cfg.campaign.seeds == (17, 29, 43)
     assert cfg.tuning.sweep_runs == 16
-    assert cfg.tuning.sweep_budget_fraction == 0.5
+    assert cfg.tuning.teacher_candidates == (cfg.teacher_model,)
 
 
 def test_campaign_max_runs_cannot_exceed_seed_count(tmp_path: Path):
@@ -59,10 +41,10 @@ def test_campaign_max_runs_cannot_exceed_seed_count(tmp_path: Path):
         load_config(cfg_path)
 
 
-def test_invalid_tuning_fraction_rejected(tmp_path: Path):
+def test_empty_teacher_candidates_rejected(tmp_path: Path):
     cfg_path = tmp_path / "bad_tuning.toml"
     text = Path("config/default.toml").read_text()
-    text = text.replace("sweep_budget_fraction = 0.5", "sweep_budget_fraction = 1.2")
+    text = text.replace("teacher_candidates = [\"meta-llama/Llama-3.1-8B\"]", "teacher_candidates = []")
     cfg_path.write_text(text)
     with pytest.raises(ValueError):
         load_config(cfg_path)

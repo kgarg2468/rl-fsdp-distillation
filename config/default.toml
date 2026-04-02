@@ -2,16 +2,6 @@
 name = "RL + FSDP + Distillation"
 seed = 42
 
-[budget]
-target_cap_usd = 25.0
-hard_cap_usd = 30.0
-
-[stage_budgets_usd]
-rl = 12.0
-fsdp = 8.0
-distill = 6.0
-eval = 3.0
-
 [token_rates_per_million]
 prefill = 0.13
 sample = 0.40
@@ -82,6 +72,5 @@ early_stop_threshold = 0.03
 stage1_prompt_limit = 30
 stage2_prompt_limit = 150
 sweep_runs = 16
-teacher_candidates = ["meta-llama/Llama-3.1-8B", "meta-llama/Llama-3.1-70B-Instruct"]
+teacher_candidates = ["meta-llama/Llama-3.1-8B"]
 promotion_top_k = 2
-sweep_budget_fraction = 0.5
