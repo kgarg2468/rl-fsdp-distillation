@@ -215,6 +215,9 @@ def test_tune_real_mode_generates_summary_and_candidates(tmp_path: Path, monkeyp
     assert summary["teacher_sweep"]["runs_executed"] == 8
     assert summary["distill_sweep"]["runs_executed"] == 8
     assert summary["final_campaign"]["executed"] is True
+    assert "acceptance_checks" in summary
+    assert summary["acceptance_checks"]["teacher_margin_winner_pass"] is True
+    assert summary["acceptance_checks"]["student_gain_winner_pass"] is True
 
     tuning_summary = Path(summary["artifacts"]["tuning_summary"])
     tuning_report = Path(summary["artifacts"]["tuning_report"])

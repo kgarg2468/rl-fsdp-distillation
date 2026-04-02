@@ -184,6 +184,8 @@ def promote_candidates(candidates: list[dict[str, Any]], *, top_k: int) -> list[
 
 def format_tuning_report(summary: dict[str, Any]) -> str:
     budget = summary.get("budget", {})
+    checks = summary.get("acceptance_checks", {})
+    winner = summary.get("winner", {})
     lines = [
         "# Tuning Report",
         "",
@@ -205,6 +207,17 @@ def format_tuning_report(summary: dict[str, Any]) -> str:
         f"- Teacher runs executed: {summary.get('teacher_sweep', {}).get('runs_executed', 0)}",
         f"- Distill runs executed: {summary.get('distill_sweep', {}).get('runs_executed', 0)}",
         f"- Promoted candidates: {len(summary.get('promoted_candidates', []))}",
+        "",
+        "## Winner",
+        f"- Winner candidate id: {winner.get('candidate_id', 'n/a') if isinstance(winner, dict) else 'n/a'}",
+        f"- Winner student-baseline: {winner.get('student_minus_baseline', 'n/a') if isinstance(winner, dict) else 'n/a'}",
+        f"- Winner teacher-baseline: {winner.get('teacher_minus_baseline', 'n/a') if isinstance(winner, dict) else 'n/a'}",
+        "",
+        "## Acceptance Checks",
+        f"- Teacher margin >= +0.05 (winner): {checks.get('teacher_margin_winner_pass', False)}",
+        f"- Student gain >= +0.03 (winner): {checks.get('student_gain_winner_pass', False)}",
+        f"- Integrity passed (winner): {checks.get('integrity_winner_pass', False)}",
+        f"- Eval duration < 720s (winner): {checks.get('eval_runtime_winner_pass', False)}",
         "",
         "## Confirmation",
         f"- Final campaign executed: {summary.get('final_campaign', {}).get('executed', False)}",

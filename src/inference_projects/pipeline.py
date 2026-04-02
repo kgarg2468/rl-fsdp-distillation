@@ -752,6 +752,15 @@ def run_tune(
     if total_spend_usd >= project_hard_cap_usd:
         cap_hit = True
 
+    acceptance_checks = {
+        "teacher_margin_winner_pass": bool(winner_row and float(winner_row.get("teacher_minus_baseline", 0.0)) >= 0.05),
+        "student_gain_winner_pass": bool(winner_row and float(winner_row.get("student_minus_baseline", 0.0)) >= 0.03),
+        "integrity_winner_pass": bool(winner_row and bool(winner_row.get("integrity_pass", False))),
+        "eval_runtime_winner_pass": bool(
+            winner_row and float(winner_row.get("eval_duration_seconds", 0.0)) < 720.0
+        ),
+    }
+
     candidates_path = tuning_dir / "candidates.jsonl"
     candidates_path.parent.mkdir(parents=True, exist_ok=True)
     candidates_path.write_text(
@@ -778,6 +787,13 @@ def run_tune(
         "confirmation_runs": confirmation_rows,
         "winner": winner_row,
         "final_campaign": final_campaign_info,
+        "acceptance_checks": acceptance_checks,
+        "execution_counts": {
+            "candidates_total": len(candidate_rows),
+            "teacher_candidates": len(teacher_rows),
+            "distill_candidates": len(distill_rows),
+            "confirmation_candidates": len(confirmation_rows),
+        },
         "budget": {
             "hard_cap_usd": round(project_hard_cap_usd, 4),
             "prior_spend_usd": round(prior_spend_usd, 4),
