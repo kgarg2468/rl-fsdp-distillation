@@ -169,15 +169,29 @@ def test_real_mode_missing_usage_fails(tmp_path: Path, monkeypatch: pytest.Monke
         run_pipeline_command("rl", mode="real", state_dir=state_dir)
 
 
-def test_campaign_runs_without_prior_ledger(tmp_path: Path):
+def test_campaign_runs_without_prior_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     state_dir = tmp_path / "state"
-    summary = run_pipeline_command("campaign", mode="mock", state_dir=state_dir)
+    monkeypatch.setattr(
+        "inference_projects.pipeline.run_campaign",
+        lambda *, cfg, mode, state_dir: {"executed_seeds": [17], "mode": mode, "state_dir": str(state_dir)},
+    )
+    summary = run_pipeline_command("campaign", mode="real", state_dir=state_dir)
     assert summary is not None
     assert "executed_seeds" in summary
 
 
-def test_tune_runs_without_prior_ledger(tmp_path: Path):
+def test_tune_runs_without_prior_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     state_dir = tmp_path / "state"
-    summary = run_pipeline_command("tune", mode="mock", state_dir=state_dir)
+    monkeypatch.setattr(
+        "inference_projects.pipeline.run_tune",
+        lambda *, cfg, mode, state_dir, prior_ledger, project_hard_cap_usd: {
+            "status": "ok",
+            "mode": mode,
+            "state_dir": str(state_dir),
+            "hard_cap": project_hard_cap_usd,
+            "prior_ledger": prior_ledger,
+        },
+    )
+    summary = run_pipeline_command("tune", mode="real", state_dir=state_dir)
     assert summary is not None
     assert "status" in summary

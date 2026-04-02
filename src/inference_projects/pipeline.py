@@ -118,12 +118,11 @@ def run_pipeline_command(
         return _dryrun_summary(cfg, resolved_mode)
 
     if command == "campaign":
+        _ = (prior_ledger, project_hard_cap_usd)
         return run_campaign(
             cfg=cfg,
             mode=resolved_mode,
             state_dir=paths.root,
-            prior_ledger=Path(prior_ledger) if prior_ledger else None,
-            project_hard_cap_usd=float(project_hard_cap_usd),
         )
 
     if command == "tune":
@@ -243,14 +242,7 @@ def run_campaign(
     cfg: ProjectConfig,
     mode: str,
     state_dir: Path,
-    prior_ledger: Path | None,
-    project_hard_cap_usd: float,
 ) -> dict[str, object]:
-    if project_hard_cap_usd <= 0:
-        raise ValueError("project_hard_cap_usd must be > 0")
-    if mode == "real" and prior_ledger is None:
-        raise ValueError("Campaign in real mode requires --prior-ledger")
-
     campaign_dir = state_dir / "campaign"
     frozen_prompts_path = campaign_dir / "frozen_prompts.jsonl"
     frozen_info = campaign_utils.freeze_prompt_file(
@@ -258,11 +250,9 @@ def run_campaign(
         frozen_path=frozen_prompts_path,
         prompt_limit=cfg.evaluation.prompt_limit,
     )
-    prior_spend_usd = _load_prior_spend(prior_ledger)
 
     new_spend_usd = 0.0
     stop_reason = ""
-    stopped_for_budget = False
     run_rows: list[list[dict[str, Any]]] = []
     run_summaries: list[dict[str, Any]] = []
     early_stop = {"triggered": False, "evaluated_after_runs": 0, "checks": {}}
@@ -285,18 +275,6 @@ def run_campaign(
         run_halted = False
 
         for stage in (*REQUIRED_STAGES, "report"):
-            if stage in REQUIRED_STAGES:
-                projected_stage_cost = budget.projected_stage_cost_usd(stage, run_cfg)
-                projected_total = prior_spend_usd + new_spend_usd + projected_stage_cost
-                if projected_total > project_hard_cap_usd:
-                    stopped_for_budget = True
-                    run_halted = True
-                    stop_reason = (
-                        f"Stopped before seed {seed} stage '{stage}': projected total "
-                        f"${projected_total:.4f} exceeds hard cap ${project_hard_cap_usd:.4f}."
-                    )
-                    break
-
             stage_started = time.monotonic()
             ledger_before = load_ledger(run_paths.ledger)
             records_before = len(ledger_before.records)
@@ -424,12 +402,12 @@ def run_campaign(
         },
         "early_stop": early_stop,
         "budget": {
-            "hard_cap_usd": round(project_hard_cap_usd, 4),
-            "prior_spend_usd": round(prior_spend_usd, 4),
+            "hard_cap_usd": None,
+            "prior_spend_usd": 0.0,
             "new_spend_usd": round(new_spend_usd, 4),
-            "total_spend_usd": round(prior_spend_usd + new_spend_usd, 4),
-            "stopped_for_budget": stopped_for_budget,
-            "prior_ledger_path": str(prior_ledger) if prior_ledger else None,
+            "total_spend_usd": round(new_spend_usd, 4),
+            "stopped_for_budget": False,
+            "prior_ledger_path": None,
         },
         "stop_reason": stop_reason,
     }

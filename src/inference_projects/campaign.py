@@ -233,19 +233,21 @@ def should_early_stop_after_two_runs(
 
 
 def format_campaign_report(summary: dict[str, Any]) -> str:
+    spend = summary.get("budget", {})
     lines = [
         "# Campaign Report",
         "",
         "## Status",
         f"- Campaign status: {summary.get('campaign_status', 'unknown')}",
         "",
-        "## Budget",
-        f"- Hard cap (USD): {summary['budget']['hard_cap_usd']:.2f}",
-        f"- Prior spend (USD): {summary['budget']['prior_spend_usd']:.4f}",
-        f"- New spend (USD): {summary['budget']['new_spend_usd']:.4f}",
-        f"- Total spend incl prior (USD): {summary['budget']['total_spend_usd']:.4f}",
-        f"- Stopped for budget: {summary['budget']['stopped_for_budget']}",
+        "## Spend Telemetry",
+        f"- Prior spend (USD): {float(spend.get('prior_spend_usd', 0.0)):.4f}",
+        f"- New spend (USD): {float(spend.get('new_spend_usd', 0.0)):.4f}",
+        f"- Total spend (USD): {float(spend.get('total_spend_usd', 0.0)):.4f}",
     ]
+    hard_cap = spend.get("hard_cap_usd")
+    if isinstance(hard_cap, (int, float)):
+        lines.append(f"- Hard cap (USD): {float(hard_cap):.2f}")
     if summary.get("stop_reason"):
         lines.append(f"- Stop reason: {summary['stop_reason']}")
 

@@ -181,14 +181,8 @@ def _patch_fake_real_adapters(
     )
 
 
-def _write_prior_ledger(path: Path, total_spend_usd: float) -> None:
-    path.write_text(json.dumps({"total_spend_usd": total_spend_usd}) + "\n")
-
-
 def test_campaign_stops_after_two_runs_when_variance_low(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     state_dir = tmp_path / "state"
-    prior_ledger = tmp_path / "prior_ledger.json"
-    _write_prior_ledger(prior_ledger, total_spend_usd=0.0004)
     monkeypatch.setenv("TINKER_API_KEY", "dummy")
     monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
     _patch_fake_real_adapters(monkeypatch, student_score_for_seed=lambda seed: 0.35 if seed == 17 else 0.36)
@@ -197,8 +191,6 @@ def test_campaign_stops_after_two_runs_when_variance_low(tmp_path: Path, monkeyp
         "campaign",
         mode="real",
         state_dir=state_dir,
-        prior_ledger=prior_ledger,
-        project_hard_cap_usd=35.0,
     )
 
     assert summary is not None
@@ -220,8 +212,6 @@ def test_campaign_stops_after_two_runs_when_variance_low(tmp_path: Path, monkeyp
 
 def test_campaign_runs_third_seed_when_variance_high(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     state_dir = tmp_path / "state"
-    prior_ledger = tmp_path / "prior_ledger.json"
-    _write_prior_ledger(prior_ledger, total_spend_usd=0.0)
     monkeypatch.setenv("TINKER_API_KEY", "dummy")
     monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
     _patch_fake_real_adapters(
@@ -233,8 +223,6 @@ def test_campaign_runs_third_seed_when_variance_high(tmp_path: Path, monkeypatch
         "campaign",
         mode="real",
         state_dir=state_dir,
-        prior_ledger=prior_ledger,
-        project_hard_cap_usd=35.0,
     )
     assert summary is not None
     assert summary["early_stop"]["triggered"] is False
@@ -242,10 +230,8 @@ def test_campaign_runs_third_seed_when_variance_high(tmp_path: Path, monkeypatch
     assert len(summary["runs"]) == 3
 
 
-def test_campaign_stops_for_global_budget_before_stage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_campaign_spend_fields_are_informational(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     state_dir = tmp_path / "state"
-    prior_ledger = tmp_path / "prior_ledger.json"
-    _write_prior_ledger(prior_ledger, total_spend_usd=34.99)
     monkeypatch.setenv("TINKER_API_KEY", "dummy")
     monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
     _patch_fake_real_adapters(monkeypatch, student_score_for_seed=lambda seed: 0.35)
@@ -254,18 +240,14 @@ def test_campaign_stops_for_global_budget_before_stage(tmp_path: Path, monkeypat
         "campaign",
         mode="real",
         state_dir=state_dir,
-        prior_ledger=prior_ledger,
-        project_hard_cap_usd=35.0,
     )
     assert summary is not None
-    assert summary["budget"]["stopped_for_budget"] is True
-    assert "exceeds hard cap" in summary["stop_reason"]
+    assert summary["budget"]["stopped_for_budget"] is False
+    assert summary["budget"]["hard_cap_usd"] is None
 
 
 def test_campaign_integrity_failure_sets_needs_debug_and_stops(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     state_dir = tmp_path / "state"
-    prior_ledger = tmp_path / "prior_ledger.json"
-    _write_prior_ledger(prior_ledger, total_spend_usd=0.0)
     monkeypatch.setenv("TINKER_API_KEY", "dummy")
     monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
     _patch_fake_real_adapters(
@@ -278,8 +260,6 @@ def test_campaign_integrity_failure_sets_needs_debug_and_stops(tmp_path: Path, m
         "campaign",
         mode="real",
         state_dir=state_dir,
-        prior_ledger=prior_ledger,
-        project_hard_cap_usd=35.0,
     )
 
     assert summary is not None
