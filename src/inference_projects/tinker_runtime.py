@@ -139,13 +139,16 @@ def create_lora_checkpoint(
     service: ServiceClient,
     base_model: str,
     stage: str,
+    rank: int = 8,
+    seed: int | None = None,
     poll_interval_seconds: int,
     timeout_seconds: int,
     user_metadata: dict[str, str] | None = None,
 ) -> TrainingCheckpoint:
     train_client = service.create_lora_training_client(
         base_model=base_model,
-        rank=8,
+        rank=rank,
+        seed=seed,
         user_metadata=user_metadata,
     )
     info = train_client.get_info()
@@ -421,6 +424,12 @@ def _model_health(outputs: list[str]) -> dict[str, float]:
     }
 
 
+def _apply_prompt_template(prompt: str, template: str) -> str:
+    if template == "numeric_strict":
+        return f"{prompt}\nRespond with only the final integer. No words."
+    return prompt
+
+
 def _mean(values: list[float]) -> float:
     if not values:
         return 0.0
@@ -575,36 +584,128 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
     service = build_service_client()
     prompts = load_canary_prompts(limit=4)
     prompt_texts = [row.prompt for row in prompts]
+    teacher_prompt_texts = [
+        _apply_prompt_template(row.prompt, cfg.distillation.teacher_prompt_template) for row in prompts
+    ]
 
     teacher_samples = sample_prompts(
         service=service,
-        prompts=prompt_texts,
+        prompts=teacher_prompt_texts,
         prompt_rows=prompts,
         stage="distill",
         model_label="teacher",
         model_path=teacher_checkpoint_path,
-        max_tokens=24,
+        max_tokens=cfg.evaluation.max_tokens_eval,
         seed=cfg.seed,
+        temperature=cfg.evaluation.eval_temperature,
+        stop_tokens=cfg.evaluation.eval_stop_tokens,
     )
+    baseline_samples = sample_prompts(
+        service=service,
+        prompts=prompt_texts,
+        prompt_rows=prompts,
+        stage="distill",
+        model_label="baseline",
+        base_model=cfg.baseline_model,
+        max_tokens=cfg.evaluation.max_tokens_eval,
+        seed=cfg.seed,
+        temperature=cfg.evaluation.eval_temperature,
+        stop_tokens=cfg.evaluation.eval_stop_tokens,
+    )
+
+    distill_rows: list[dict[str, object]] = []
+    for row, teacher_output, baseline_output in zip(prompts, teacher_samples.outputs, baseline_samples.outputs):
+        teacher_refusal = _is_refusal_like(teacher_output)
+        teacher_parse = _numeric_parse_rate(teacher_output) == 1.0
+        teacher_exact = _exact_numeric_match(teacher_output, row.reference) == 1.0
+        baseline_exact = _exact_numeric_match(baseline_output, row.reference) == 1.0
+        distill_rows.append(
+            {
+                "row_id": row.row_id,
+                "prompt": row.prompt,
+                "reference": row.reference,
+                "teacher_output": teacher_output,
+                "baseline_output": baseline_output,
+                "teacher_refusal_like": teacher_refusal,
+                "teacher_numeric_parse": teacher_parse,
+                "teacher_exact_match": teacher_exact,
+                "baseline_exact_match": baseline_exact,
+                "baseline_fail_teacher_pass": (not baseline_exact) and teacher_exact,
+                "selected_for_distill": False,
+            }
+        )
+
+    def _eligible(row: dict[str, object]) -> bool:
+        if cfg.distillation.filter_profile == "strict":
+            return (
+                bool(row["teacher_numeric_parse"])
+                and not bool(row["teacher_refusal_like"])
+                and bool(row["teacher_exact_match"])
+            )
+        return bool(row["teacher_numeric_parse"]) and not bool(row["teacher_refusal_like"])
+
+    eligible = [row for row in distill_rows if _eligible(row)]
+    if not eligible:
+        eligible = list(distill_rows)
+    hard = [row for row in eligible if bool(row["baseline_fail_teacher_pass"])]
+    easy = [row for row in eligible if not bool(row["baseline_fail_teacher_pass"])]
+    target_size = len(eligible)
+    target_hard = min(len(hard), int(round(target_size * cfg.distillation.hard_example_ratio)))
+    selected_rows = [*hard[:target_hard], *easy[: max(0, target_size - target_hard)]]
+    if len(selected_rows) < target_size:
+        selected_ids = {id(row) for row in selected_rows}
+        for row in hard:
+            if id(row) in selected_ids:
+                continue
+            selected_rows.append(row)
+            if len(selected_rows) >= target_size:
+                break
+    if not selected_rows:
+        selected_rows = list(distill_rows)
+    selected_row_ids = {str(row["row_id"]) for row in selected_rows}
+    for row in distill_rows:
+        row["selected_for_distill"] = str(row["row_id"]) in selected_row_ids
+
+    selected_prompt_rows = [row for row in prompts if row.row_id in selected_row_ids]
+    selected_prompt_texts = [row.prompt for row in selected_prompt_rows]
 
     student_checkpoint = create_lora_checkpoint(
         service=service,
         base_model=cfg.student_model,
         stage="distill",
+        rank=cfg.distillation.lora_rank,
+        seed=cfg.seed,
         poll_interval_seconds=cfg.runtime.real_poll_interval_seconds,
         timeout_seconds=cfg.runtime.real_poll_timeout_seconds,
-        user_metadata={"stage": "distill", "pipeline": "inference-projects"},
+        user_metadata={
+            "stage": "distill",
+            "pipeline": "inference-projects",
+            "filter_profile": cfg.distillation.filter_profile,
+            "teacher_prompt_template": cfg.distillation.teacher_prompt_template,
+            "kd_alpha": str(cfg.distillation.kd_alpha),
+            "kd_temperature": str(cfg.distillation.kd_temperature),
+            "learning_rate": str(cfg.distillation.learning_rate),
+            "epochs": str(cfg.distillation.epochs),
+            "batch_size": str(cfg.distillation.batch_size),
+            "warmup_ratio": str(cfg.distillation.warmup_ratio),
+            "hard_example_ratio": str(cfg.distillation.hard_example_ratio),
+            "context_length": str(cfg.distillation.context_length),
+            "grad_clip": str(cfg.distillation.grad_clip),
+            "weight_decay": str(cfg.distillation.weight_decay),
+        },
     )
 
     student_samples = sample_prompts(
         service=service,
-        prompts=prompt_texts,
-        prompt_rows=prompts,
+        prompts=selected_prompt_texts,
+        prompt_rows=selected_prompt_rows,
         stage="distill",
         model_label="student",
         model_path=student_checkpoint.sampler_checkpoint_path,
-        max_tokens=24,
+        max_tokens=cfg.evaluation.max_tokens_eval,
         seed=cfg.seed,
+        temperature=cfg.evaluation.eval_temperature,
+        stop_tokens=cfg.evaluation.eval_stop_tokens,
     )
 
     teacher_quality = float(teacher_payload.get("quality_score", 0.75))
@@ -626,20 +727,56 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
             "run_id": student_checkpoint.run_id,
             "distill_stability_score": 0.88,
             "distill_nan_events": 0,
+            "distillation_config": {
+                "teacher_prompt_template": cfg.distillation.teacher_prompt_template,
+                "filter_profile": cfg.distillation.filter_profile,
+                "hard_example_ratio": cfg.distillation.hard_example_ratio,
+                "kd_alpha": cfg.distillation.kd_alpha,
+                "kd_temperature": cfg.distillation.kd_temperature,
+                "learning_rate": cfg.distillation.learning_rate,
+                "epochs": cfg.distillation.epochs,
+                "batch_size": cfg.distillation.batch_size,
+                "warmup_ratio": cfg.distillation.warmup_ratio,
+                "lora_rank": cfg.distillation.lora_rank,
+                "context_length": cfg.distillation.context_length,
+                "grad_clip": cfg.distillation.grad_clip,
+                "weight_decay": cfg.distillation.weight_decay,
+            },
+            "distill_dataset": {
+                "total_rows": len(distill_rows),
+                "eligible_rows": len(eligible),
+                "selected_rows": len(selected_rows),
+                "selected_hard_rows": sum(1 for row in selected_rows if bool(row["baseline_fail_teacher_pass"])),
+                "selected_hard_ratio": round(
+                    (
+                        sum(1 for row in selected_rows if bool(row["baseline_fail_teacher_pass"]))
+                        / max(1, len(selected_rows))
+                    ),
+                    4,
+                ),
+            },
+            "distill_rows": distill_rows,
             "notes": "Real distillation stage sampled teacher outputs and checkpointed student model.",
             PROMPT_TRACES_KEY: [*teacher_samples.trace_rows, *student_samples.trace_rows],
         },
         "usage": _usage_dict(
-            prefill_tokens=teacher_samples.prefill_tokens + student_samples.prefill_tokens,
-            sample_tokens=teacher_samples.sample_tokens + student_samples.sample_tokens,
+            prefill_tokens=teacher_samples.prefill_tokens
+            + baseline_samples.prefill_tokens
+            + student_samples.prefill_tokens,
+            sample_tokens=teacher_samples.sample_tokens
+            + baseline_samples.sample_tokens
+            + student_samples.sample_tokens,
             train_tokens=0,
             run_id=student_checkpoint.run_id,
             provider_raw={
                 "teacher_sampling_session_id": teacher_samples.session_id,
+                "baseline_sampling_session_id": baseline_samples.session_id,
                 "student_sampling_session_id": student_samples.session_id,
                 "teacher_checkpoint_path": teacher_checkpoint_path,
                 "student_checkpoint_path": student_checkpoint.checkpoint_path,
                 "student_sampler_checkpoint_path": student_checkpoint.sampler_checkpoint_path,
+                "filter_profile": cfg.distillation.filter_profile,
+                "teacher_prompt_template": cfg.distillation.teacher_prompt_template,
                 "stage": "distill",
             },
         ),
