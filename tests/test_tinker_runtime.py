@@ -1,6 +1,9 @@
 from inference_projects.config import load_config
+from dataclasses import replace
 from inference_projects.tinker_runtime import (
     CANARY_FIXTURE_PATH,
+    SamplingBatch,
+    TrainingCheckpoint,
     _cost_per_1k,
     _exact_numeric_match,
     _make_training_datum,
@@ -12,6 +15,7 @@ from inference_projects.tinker_runtime import (
     continue_from_checkpoint,
     create_lora_checkpoint,
     load_canary_prompts,
+    run_real_rl,
 )
 
 
@@ -212,3 +216,59 @@ def test_run_training_loop_tracks_steps_and_losses():
     assert len(summary["loss_trace"]) == 4
     assert client.learning_rates[0] < 2e-5
     assert client.learning_rates[-1] == 2e-5
+
+
+def test_run_real_rl_records_training_metadata(monkeypatch):
+    cfg = load_config()
+    cfg = replace(cfg, evaluation=replace(cfg.evaluation, prompt_limit=2))
+
+    class FakeTrainClient:
+        def get_info(self):
+            return type("Info", (), {"model_id": "run-rl"})()
+
+    class FakeService:
+        def create_lora_training_client(self, **kwargs):
+            _ = kwargs
+            return FakeTrainClient()
+
+    monkeypatch.setattr("inference_projects.tinker_runtime.build_service_client", lambda: FakeService())
+    monkeypatch.setattr(
+        "inference_projects.tinker_runtime.load_canary_prompts",
+        lambda **kwargs: [
+            type("PromptRow", (), {"row_id": "r1", "prompt": "1+1", "reference": "2"})(),
+            type("PromptRow", (), {"row_id": "r2", "prompt": "2+2", "reference": "4"})(),
+        ],
+    )
+    monkeypatch.setattr(
+        "inference_projects.tinker_runtime._run_training_loop",
+        lambda **kwargs: {
+            "steps": 3,
+            "batches_per_epoch": 2,
+            "nan_events": 0,
+            "loss_trace": [0.5, 0.4, 0.3],
+            "train_tokens": 12,
+        },
+    )
+    monkeypatch.setattr(
+        "inference_projects.tinker_runtime._save_training_checkpoints",
+        lambda **kwargs: TrainingCheckpoint(
+            run_id="run-rl",
+            checkpoint_path="tinker://ckpt/rl",
+            sampler_checkpoint_path="tinker://sampler/rl",
+        ),
+    )
+    monkeypatch.setattr(
+        "inference_projects.tinker_runtime.sample_prompts",
+        lambda **kwargs: SamplingBatch(
+            outputs=["2", "4"],
+            prefill_tokens=8,
+            sample_tokens=2,
+            session_id="sess-1",
+            trace_rows=[],
+        ),
+    )
+
+    result = run_real_rl(cfg=cfg)
+    assert result["payload"]["training"]["steps"] == 3
+    assert result["payload"]["rl_nan_events"] == 0
+    assert result["usage"]["train_tokens"] == 12

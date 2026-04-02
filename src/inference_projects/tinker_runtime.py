@@ -628,34 +628,91 @@ def _run_training_loop(
     }
 
 
+def _save_training_checkpoints(
+    *,
+    service: ServiceClient,
+    train_client: Any,
+    run_id: str,
+    stage: str,
+    poll_interval_seconds: int,
+    timeout_seconds: int,
+) -> TrainingCheckpoint:
+    checkpoint_path = _save_new_checkpoint(
+        service=service,
+        run_id=run_id,
+        save_state_callable=train_client.save_state,
+        stage=stage,
+        poll_interval_seconds=poll_interval_seconds,
+        timeout_seconds=timeout_seconds,
+        wait_for_checkpoint=True,
+    )
+    sampler_checkpoint_path = _save_new_checkpoint(
+        service=service,
+        run_id=run_id,
+        save_state_callable=train_client.save_weights_for_sampler,
+        stage=stage,
+        poll_interval_seconds=poll_interval_seconds,
+        timeout_seconds=timeout_seconds,
+        wait_for_checkpoint=False,
+    )
+    return TrainingCheckpoint(
+        run_id=run_id,
+        checkpoint_path=checkpoint_path,
+        sampler_checkpoint_path=sampler_checkpoint_path,
+    )
+
+
 def run_real_rl(*, cfg: ProjectConfig) -> dict[str, object]:
     service = build_service_client()
     retry_config = _runtime_retry_config(cfg)
-    prompts = load_canary_prompts(limit=2)
-
-    checkpoint = create_lora_checkpoint(
-        service=service,
+    prompts = load_canary_prompts(limit=cfg.evaluation.prompt_limit, fixture_path=cfg.evaluation.prompt_file)
+    training_examples = [(row.prompt, row.reference or row.prompt) for row in prompts]
+    train_client = service.create_lora_training_client(
         base_model=cfg.teacher_model,
+        rank=cfg.distillation.lora_rank,
+        seed=cfg.seed,
+        user_metadata={"stage": "rl", "pipeline": "inference-projects"},
+    )
+    info = train_client.get_info()
+    run_id = str(info.model_id)
+    training = _run_training_loop(
+        train_client=train_client,
+        examples=training_examples,
+        epochs=cfg.distillation.epochs,
+        batch_size=cfg.distillation.batch_size,
+        learning_rate=cfg.distillation.learning_rate,
+        warmup_ratio=cfg.distillation.warmup_ratio,
+        weight_decay=cfg.distillation.weight_decay,
+        grad_clip_norm=cfg.distillation.grad_clip,
+        max_consecutive_failures=cfg.runtime.max_consecutive_failures,
+        stage="rl",
+    )
+    checkpoint = _save_training_checkpoints(
+        service=service,
+        train_client=train_client,
+        run_id=run_id,
         stage="rl",
         poll_interval_seconds=cfg.runtime.real_poll_interval_seconds,
         timeout_seconds=cfg.runtime.real_poll_timeout_seconds,
-        user_metadata={"stage": "rl", "pipeline": "inference-projects"},
     )
+    eval_prompts = prompts[: min(8, len(prompts))]
     sampled = sample_prompts(
         service=service,
-        prompts=[row.prompt for row in prompts],
-        prompt_rows=prompts,
+        prompts=[row.prompt for row in eval_prompts],
+        prompt_rows=eval_prompts,
         stage="rl",
         model_label="teacher",
         model_path=checkpoint.sampler_checkpoint_path,
-        max_tokens=16,
+        max_tokens=cfg.evaluation.max_tokens_eval,
         seed=cfg.seed,
         retry_config=retry_config,
         max_consecutive_failures=cfg.runtime.max_consecutive_failures,
     )
 
-    quality_score = round(min(0.95, 0.60 + (_mean([len(x) for x in sampled.outputs]) / 100.0)), 4)
-    stability_score = 0.92
+    overlap_scores = [_score_overlap(out, row.reference) for out, row in zip(sampled.outputs, eval_prompts)]
+    quality_score = round(_mean(overlap_scores), 4)
+    rl_nan_events = int(training["nan_events"])
+    stability_score = round(max(0.0, 1.0 - (rl_nan_events / max(1, int(training["steps"])))), 4)
 
     return {
         "payload": {
@@ -667,19 +724,33 @@ def run_real_rl(*, cfg: ProjectConfig) -> dict[str, object]:
             "sampler_checkpoint_path": checkpoint.sampler_checkpoint_path,
             "run_id": checkpoint.run_id,
             "rl_stability_score": stability_score,
-            "rl_nan_events": 0,
-            "notes": "Real RL stage executed via Tinker training checkpoint workflow.",
+            "rl_nan_events": rl_nan_events,
+            "training": {
+                "steps": int(training["steps"]),
+                "batches_per_epoch": int(training["batches_per_epoch"]),
+                "epochs": cfg.distillation.epochs,
+                "batch_size": cfg.distillation.batch_size,
+                "learning_rate": cfg.distillation.learning_rate,
+                "warmup_ratio": cfg.distillation.warmup_ratio,
+                "weight_decay": cfg.distillation.weight_decay,
+                "grad_clip_norm": cfg.distillation.grad_clip,
+                "loss_trace": list(training["loss_trace"]),
+                "train_examples": len(training_examples),
+            },
+            "notes": "Real RL stage completed iterative training with optimizer steps.",
             PROMPT_TRACES_KEY: sampled.trace_rows,
         },
         "usage": _usage_dict(
             prefill_tokens=sampled.prefill_tokens,
             sample_tokens=sampled.sample_tokens,
-            train_tokens=0,
+            train_tokens=int(training["train_tokens"]),
             run_id=checkpoint.run_id,
             provider_raw={
                 "checkpoint_path": checkpoint.checkpoint_path,
                 "sampler_checkpoint_path": checkpoint.sampler_checkpoint_path,
                 "sampling_session_id": sampled.session_id,
+                "training_steps": int(training["steps"]),
+                "training_loss_trace_count": len(training["loss_trace"]),
                 "stage": "rl",
             },
         ),
