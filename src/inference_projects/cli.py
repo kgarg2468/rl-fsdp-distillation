@@ -25,6 +25,31 @@ def build_parser() -> argparse.ArgumentParser:
         default=".",
         help="Directory where artifacts are written (default: current project root).",
     )
+    parser.add_argument(
+        "--resume",
+        dest="resume",
+        action="store_true",
+        default=True,
+        help="Resume from command run-state when available (default: enabled).",
+    )
+    parser.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        help="Disable resume and run from scratch.",
+    )
+    parser.add_argument(
+        "--heartbeat-seconds",
+        type=int,
+        default=30,
+        help="Heartbeat interval while stages are in progress.",
+    )
+    parser.add_argument(
+        "--progress-timeout-seconds",
+        type=float,
+        default=None,
+        help="Mark stage as stalled if elapsed time exceeds this value.",
+    )
     return parser
 
 
@@ -36,6 +61,9 @@ def main() -> None:
         mode=args.mode,
         config_path=Path(args.config),
         state_dir=Path(args.state_dir),
+        resume=args.resume,
+        heartbeat_seconds=args.heartbeat_seconds,
+        progress_timeout_seconds=args.progress_timeout_seconds,
     )
     if result is not None:
         print(json.dumps(result, indent=2))
