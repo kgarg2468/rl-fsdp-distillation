@@ -21,7 +21,38 @@ This repository orchestrates staged training/evaluation workflows with strict sp
 
 ## Pipeline Architecture & Data Flow
 
-_Work in progress in this commit: section scaffold only._
+The pipeline executes stage commands in sequence and writes artifacts into a state directory.
+
+```mermaid
+flowchart TD
+    C["config/default.toml"] --> P["preflight / dryrun checks"]
+    P --> RL["rl"]
+    RL --> TFT["teacher_ft"]
+    TFT --> D["distill"]
+    D --> E["eval"]
+    E --> R["report"]
+
+    RL --> TCK["artifacts/checkpoints/teacher/best_checkpoint.json"]
+    D --> SCK["artifacts/checkpoints/student/best_checkpoint.json"]
+    E --> EM["artifacts/eval/eval_metrics.json"]
+    R --> RM["artifacts/reports/eval_report.md"]
+
+    RL --> L["artifacts/ledger.json"]
+    TFT --> L
+    D --> L
+    E --> L
+    R --> L
+
+    RL --> A["artifacts/audit/*"]
+    TFT --> A
+    D --> A
+    E --> A
+    R --> A
+```
+
+- Orchestration entrypoint: `run_pipeline_command(...)` in `src/inference_projects/pipeline.py`.
+- Adapter routing: `select_stage_adapters(mode)` in `src/inference_projects/adapters.py`.
+- Commands `all`, `campaign`, and `tune` reuse the same config + state-dir model.
 
 ## Runtime Modes & Guardrails
 
