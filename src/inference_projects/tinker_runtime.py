@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from tinker import ModelInput, SamplingParams, ServiceClient
+from tinker.lib.retry_handler import RetryConfig
 
 from inference_projects.config import ProjectConfig
 from inference_projects.pricing import TokenUsage, cost_usd
@@ -54,6 +55,17 @@ class TrainingCheckpoint:
 def build_service_client() -> ServiceClient:
     # ServiceClient reads credentials and endpoint from environment variables.
     return ServiceClient()
+
+
+def _runtime_retry_config(cfg: ProjectConfig) -> RetryConfig:
+    return RetryConfig(
+        max_connections=cfg.runtime.retry_max_connections,
+        progress_timeout=cfg.runtime.retry_progress_timeout_seconds,
+        retry_delay_base=cfg.runtime.retry_delay_base_seconds,
+        retry_delay_max=cfg.runtime.retry_delay_max_seconds,
+        jitter_factor=cfg.runtime.retry_jitter_factor,
+        enable_retry_logic=cfg.runtime.retry_enabled,
+    )
 
 
 def load_canary_prompts(*, limit: int | None = None, fixture_path: Path = CANARY_FIXTURE_PATH) -> list[PromptRow]:
@@ -222,13 +234,19 @@ def _sampling_model_path_candidates(model_path: str) -> list[str]:
     return candidates
 
 
-def _create_sampler(*, service: ServiceClient, model_path: str | None, base_model: str | None):
+def _create_sampler(
+    *,
+    service: ServiceClient,
+    model_path: str | None,
+    base_model: str | None,
+    retry_config: RetryConfig | None = None,
+):
     if model_path:
         sampler = None
         last_error: Exception | None = None
         for candidate in _sampling_model_path_candidates(model_path):
             try:
-                sampler = service.create_sampling_client(model_path=candidate)
+                sampler = service.create_sampling_client(model_path=candidate, retry_config=retry_config)
                 break
             except Exception as exc:  # pragma: no cover - integration-specific API behavior
                 last_error = exc
@@ -240,7 +258,7 @@ def _create_sampler(*, service: ServiceClient, model_path: str | None, base_mode
             raise RuntimeError("Failed to initialize sampling client from model_path")
         return sampler
     if base_model:
-        return service.create_sampling_client(base_model=base_model)
+        return service.create_sampling_client(base_model=base_model, retry_config=retry_config)
     raise ValueError("Either base_model or model_path must be provided")
 
 
@@ -259,6 +277,8 @@ def sample_prompts(
     stop_tokens: tuple[str, ...] | None = None,
     max_concurrency: int = 1,
     batch_size: int | None = None,
+    retry_config: RetryConfig | None = None,
+    max_consecutive_failures: int = 5,
 ) -> SamplingBatch:
     if prompt_rows is not None and len(prompt_rows) != len(prompts):
         raise ValueError("prompt_rows length must match prompts length")
@@ -266,6 +286,8 @@ def sample_prompts(
         raise ValueError("max_concurrency must be > 0")
     if batch_size is not None and batch_size <= 0:
         raise ValueError("batch_size must be > 0")
+    if max_consecutive_failures <= 0:
+        raise ValueError("max_consecutive_failures must be > 0")
 
     indexed_prompts = list(enumerate(prompts))
     outputs: list[str] = [""] * len(prompts)
@@ -284,25 +306,43 @@ def sample_prompts(
         chunk_traces: list[tuple[int, dict[str, object]]] = []
         chunk_prefill = 0
         chunk_sample = 0
+        consecutive_failures = 0
 
         chunk_service = build_service_client() if max_concurrency > 1 else service
-        sampler = _create_sampler(service=chunk_service, model_path=model_path, base_model=base_model)
+        sampler = _create_sampler(
+            service=chunk_service,
+            model_path=model_path,
+            base_model=base_model,
+            retry_config=retry_config,
+        )
         tokenizer = sampler.get_tokenizer()
 
         for idx, prompt in chunk:
             prompt_ids = tokenizer.encode(prompt)
             prefill_count = len(prompt_ids)
             chunk_prefill += prefill_count
-            response = sampler.sample(
-                prompt=ModelInput.from_ints(prompt_ids),
-                num_samples=1,
-                sampling_params=SamplingParams(
-                    max_tokens=max_tokens,
-                    seed=seed + idx,
-                    temperature=temperature,
-                    stop=list(stop_tokens) if stop_tokens else None,
-                ),
-            ).result()
+            sampling_error = ""
+            try:
+                response = sampler.sample(
+                    prompt=ModelInput.from_ints(prompt_ids),
+                    num_samples=1,
+                    sampling_params=SamplingParams(
+                        max_tokens=max_tokens,
+                        seed=seed + idx,
+                        temperature=temperature,
+                        stop=list(stop_tokens) if stop_tokens else None,
+                    ),
+                ).result()
+                consecutive_failures = 0
+            except Exception as exc:
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    raise RuntimeError(
+                        f"Sampling aborted after {consecutive_failures} consecutive failures "
+                        f"for stage '{stage}' model '{model_label}': {exc}"
+                    ) from exc
+                sampling_error = str(exc)
+                response = type("SampleResponse", (), {"sequences": []})()
             sample_count = 0
             output_text = ""
             if response.sequences:
@@ -329,6 +369,7 @@ def sample_prompts(
                         "sample_tokens": sample_count,
                         "stage": stage,
                         "model_label": model_label,
+                        "sampling_error": sampling_error,
                     },
                 )
             )
@@ -457,6 +498,7 @@ def _usage_dict(
 
 def run_real_rl(*, cfg: ProjectConfig) -> dict[str, object]:
     service = build_service_client()
+    retry_config = _runtime_retry_config(cfg)
     prompts = load_canary_prompts(limit=2)
 
     checkpoint = create_lora_checkpoint(
@@ -476,6 +518,8 @@ def run_real_rl(*, cfg: ProjectConfig) -> dict[str, object]:
         model_path=checkpoint.sampler_checkpoint_path,
         max_tokens=16,
         seed=cfg.seed,
+        retry_config=retry_config,
+        max_consecutive_failures=cfg.runtime.max_consecutive_failures,
     )
 
     quality_score = round(min(0.95, 0.60 + (_mean([len(x) for x in sampled.outputs]) / 100.0)), 4)
@@ -516,6 +560,7 @@ def run_real_fsdp(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> 
         raise RuntimeError("FSDP stage requires teacher checkpoint_path from RL stage")
 
     service = build_service_client()
+    retry_config = _runtime_retry_config(cfg)
     prompts = load_canary_prompts(limit=2)
 
     checkpoint = continue_from_checkpoint(
@@ -535,6 +580,8 @@ def run_real_fsdp(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) -> 
         model_path=checkpoint.sampler_checkpoint_path,
         max_tokens=20,
         seed=cfg.seed,
+        retry_config=retry_config,
+        max_consecutive_failures=cfg.runtime.max_consecutive_failures,
     )
 
     prior_quality = float(teacher_payload.get("quality_score", 0.70))
@@ -582,6 +629,7 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
         raise RuntimeError("Distill stage requires teacher checkpoint_path from FSDP stage")
 
     service = build_service_client()
+    retry_config = _runtime_retry_config(cfg)
     prompts = load_canary_prompts(limit=4)
     prompt_texts = [row.prompt for row in prompts]
     teacher_prompt_texts = [
@@ -599,6 +647,8 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
         seed=cfg.seed,
         temperature=cfg.evaluation.eval_temperature,
         stop_tokens=cfg.evaluation.eval_stop_tokens,
+        retry_config=retry_config,
+        max_consecutive_failures=cfg.runtime.max_consecutive_failures,
     )
     baseline_samples = sample_prompts(
         service=service,
@@ -611,6 +661,8 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
         seed=cfg.seed,
         temperature=cfg.evaluation.eval_temperature,
         stop_tokens=cfg.evaluation.eval_stop_tokens,
+        retry_config=retry_config,
+        max_consecutive_failures=cfg.runtime.max_consecutive_failures,
     )
 
     distill_rows: list[dict[str, object]] = []
@@ -706,6 +758,8 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
         seed=cfg.seed,
         temperature=cfg.evaluation.eval_temperature,
         stop_tokens=cfg.evaluation.eval_stop_tokens,
+        retry_config=retry_config,
+        max_consecutive_failures=cfg.runtime.max_consecutive_failures,
     )
 
     teacher_quality = float(teacher_payload.get("quality_score", 0.75))
@@ -803,6 +857,7 @@ def run_real_eval(
     student_payload: dict[str, object],
 ) -> dict[str, object]:
     service = build_service_client()
+    retry_config = _runtime_retry_config(cfg)
     prompts = load_canary_prompts(limit=cfg.evaluation.prompt_limit, fixture_path=cfg.evaluation.prompt_file)
     prompt_texts = [row.prompt for row in prompts]
     teacher_prompt_texts = [
@@ -830,6 +885,8 @@ def run_real_eval(
         stop_tokens=cfg.evaluation.eval_stop_tokens,
         max_concurrency=cfg.evaluation.max_concurrency,
         batch_size=cfg.evaluation.batch_size,
+        retry_config=retry_config,
+        max_consecutive_failures=cfg.runtime.max_consecutive_failures,
     )
     teacher = sample_prompts(
         service=service,
@@ -845,6 +902,8 @@ def run_real_eval(
         stop_tokens=cfg.evaluation.eval_stop_tokens,
         max_concurrency=cfg.evaluation.max_concurrency,
         batch_size=cfg.evaluation.batch_size,
+        retry_config=retry_config,
+        max_consecutive_failures=cfg.runtime.max_consecutive_failures,
     )
     student = sample_prompts(
         service=service,
@@ -860,6 +919,8 @@ def run_real_eval(
         stop_tokens=cfg.evaluation.eval_stop_tokens,
         max_concurrency=cfg.evaluation.max_concurrency,
         batch_size=cfg.evaluation.batch_size,
+        retry_config=retry_config,
+        max_consecutive_failures=cfg.runtime.max_consecutive_failures,
     )
 
     baseline_scores = [_score_overlap(out, ref) for out, ref in zip(baseline.outputs, references)]
