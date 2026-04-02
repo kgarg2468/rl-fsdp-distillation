@@ -532,19 +532,51 @@ def _safe_token_ids(tokenizer: Any, text: str) -> list[int]:
 
 
 def _make_training_datum(*, tokenizer: Any, prompt: str, target: str) -> tuple[Datum, int]:
-    input_ids = _safe_token_ids(tokenizer, prompt)
+    prompt_ids = _safe_token_ids(tokenizer, prompt)
     target_ids = _safe_token_ids(tokenizer, target)
+    input_ids = list(prompt_ids) + list(target_ids)
+    target_tokens = ([0] * len(prompt_ids)) + list(target_ids)
+    target_weights = ([0.0] * len(prompt_ids)) + ([1.0] * len(target_ids))
     datum = Datum(
         model_input=ModelInput.from_ints(input_ids),
         loss_fn_inputs={
             "target_tokens": TensorData(
-                data=target_ids,
+                data=target_tokens,
                 dtype="int64",
-                shape=[len(target_ids)],
-            )
+                shape=[len(input_ids)],
+            ),
+            "weights": TensorData(
+                data=target_weights,
+                dtype="float32",
+                shape=[len(input_ids)],
+            ),
         },
     )
-    return datum, len(target_ids)
+    return datum, len(input_ids)
+
+
+def _is_loss_shape_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return (
+        "array record" in message
+        or ("target_tokens" in message and "sequence length" in message)
+        or ("loss function inputs" in message and "convert" in message)
+    )
+
+
+def _forward_backward_with_fallback(*, train_client: Any, batch: list[Datum]) -> tuple[Any, bool]:
+    try:
+        return train_client.forward_backward(batch, "cross_entropy").result(), False
+    except Exception as exc:
+        if len(batch) <= 1 or not _is_loss_shape_error(exc):
+            raise
+
+        fallback_result: Any | None = None
+        for datum in batch:
+            fallback_result = train_client.forward_backward([datum], "cross_entropy").result()
+        if fallback_result is None:
+            raise RuntimeError("micro-batch fallback produced no forward/backward result")
+        return fallback_result, True
 
 
 def _extract_loss_metric(forward_backward_result: Any) -> float | None:
@@ -609,13 +641,19 @@ def _run_training_loop(
 
     loss_trace: list[float] = []
     nan_events = 0
+    micro_batch_fallbacks = 0
     consecutive_failures = 0
     global_step = 0
 
     for _epoch in range(epochs):
         for batch in batches:
             try:
-                fwdbwd_result = train_client.forward_backward(batch, "cross_entropy").result()
+                fwdbwd_result, used_micro_batch_fallback = _forward_backward_with_fallback(
+                    train_client=train_client,
+                    batch=batch,
+                )
+                if used_micro_batch_fallback:
+                    micro_batch_fallbacks += 1
                 loss_value = _extract_loss_metric(fwdbwd_result)
                 if loss_value is not None:
                     if math.isnan(loss_value) or math.isinf(loss_value):
@@ -649,6 +687,7 @@ def _run_training_loop(
         "loss_trace": loss_trace,
         "train_tokens": train_tokens * epochs,
         "batches_per_epoch": len(batches),
+        "micro_batch_fallbacks": micro_batch_fallbacks,
     }
 
 

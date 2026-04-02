@@ -167,9 +167,10 @@ def test_make_training_datum_falls_back_for_empty_tokens():
             return []
 
     datum, target_tokens = _make_training_datum(tokenizer=EmptyTokenizer(), prompt="", target="")
-    assert target_tokens == 1
-    assert datum.model_input.chunks[0].tokens == [7]
-    assert datum.loss_fn_inputs["target_tokens"].data == [7]
+    assert target_tokens == 2
+    assert datum.model_input.chunks[0].tokens == [7, 7]
+    assert datum.loss_fn_inputs["target_tokens"].data == [0, 7]
+    assert datum.loss_fn_inputs["weights"].data == [0.0, 1.0]
 
 
 def test_run_training_loop_tracks_steps_and_losses():
@@ -192,7 +193,13 @@ def test_run_training_loop_tracks_steps_and_losses():
             return FakeTokenizer()
 
         def forward_backward(self, batch, loss_fn):
-            _ = (batch, loss_fn)
+            _ = loss_fn
+            for datum in batch:
+                input_tokens = datum.model_input.chunks[0].tokens
+                target_tokens = datum.loss_fn_inputs["target_tokens"].data
+                weights = datum.loss_fn_inputs["weights"].data
+                assert len(target_tokens) == len(input_tokens)
+                assert len(weights) == len(input_tokens)
             return FakeFuture(type("FwdBwd", (), {"metrics": {"loss": 0.25}, "loss_fn_outputs": []})())
 
         def optim_step(self, adam_params):
@@ -216,8 +223,64 @@ def test_run_training_loop_tracks_steps_and_losses():
     assert summary["steps"] == 4
     assert summary["batches_per_epoch"] == 2
     assert len(summary["loss_trace"]) == 4
+    assert summary["micro_batch_fallbacks"] == 0
     assert client.learning_rates[0] < 2e-5
     assert client.learning_rates[-1] == 2e-5
+
+
+def test_run_training_loop_uses_micro_batch_fallback_on_shape_errors():
+    class FakeTokenizer:
+        def encode(self, text):
+            return [len(text), 1]
+
+    class FakeFuture:
+        def __init__(self, value):
+            self._value = value
+
+        def result(self):
+            return self._value
+
+    class FakeTrainClient:
+        def __init__(self):
+            self.batch_calls = 0
+            self.single_calls = 0
+            self.optim_calls = 0
+
+        def get_tokenizer(self):
+            return FakeTokenizer()
+
+        def forward_backward(self, batch, loss_fn):
+            _ = loss_fn
+            if len(batch) > 1:
+                self.batch_calls += 1
+                raise RuntimeError("Could not convert loss function inputs to array record")
+            self.single_calls += 1
+            return FakeFuture(type("FwdBwd", (), {"metrics": {"loss": 0.5}, "loss_fn_outputs": []})())
+
+        def optim_step(self, adam_params):
+            _ = adam_params
+            self.optim_calls += 1
+            return FakeFuture(type("Optim", (), {"metrics": {}})())
+
+    client = FakeTrainClient()
+    summary = _run_training_loop(
+        train_client=client,
+        examples=[("p1", "t1"), ("p2", "t2"), ("p3", "t3")],
+        epochs=1,
+        batch_size=2,
+        learning_rate=1e-5,
+        warmup_ratio=0.0,
+        weight_decay=0.0,
+        grad_clip_norm=1.0,
+        max_consecutive_failures=3,
+        stage="rl",
+    )
+
+    assert summary["steps"] == 2
+    assert summary["micro_batch_fallbacks"] == 1
+    assert client.batch_calls == 1
+    assert client.single_calls == 3
+    assert client.optim_calls == 2
 
 
 def test_run_real_rl_records_training_metadata(monkeypatch):
