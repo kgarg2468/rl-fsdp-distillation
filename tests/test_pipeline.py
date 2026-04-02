@@ -175,3 +175,11 @@ def test_campaign_real_mode_requires_prior_ledger(tmp_path: Path, monkeypatch: p
     monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
     with pytest.raises(ValueError):
         run_pipeline_command("campaign", mode="real", state_dir=state_dir, project_hard_cap_usd=35.0)
+
+
+def test_tune_real_mode_requires_prior_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("TINKER_API_KEY", "dummy-key")
+    monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
+    with pytest.raises(ValueError):
+        run_pipeline_command("tune", mode="real", state_dir=state_dir, project_hard_cap_usd=35.0)
