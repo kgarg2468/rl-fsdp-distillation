@@ -78,6 +78,14 @@ source .venv/bin/activate
 python3 -m pip install -e '.[dev]'
 ```
 
+### Quickstart (Mock Mode)
+
+```bash
+STATE_DIR="$(python3 scripts/allocate_run_dir.py --root runs)"
+python3 -m inference_projects.cli preflight --mode mock --config config/default.toml --state-dir "$STATE_DIR"
+python3 -m inference_projects.cli all --mode mock --config config/default.toml --state-dir "$STATE_DIR"
+```
+
 ### Make Targets
 
 ```bash
@@ -199,4 +207,4 @@ rg -n \"tune|campaign|preflight|dryrun\" README.md
 - This is an orchestration and evaluation harness; it does not ship a full standalone training infrastructure stack.
 - `real` mode depends on reachable Tinker services and valid credentials.
 - Default smoke behavior runs only the `rl` stage (`smoke` command).
-- The README documents current behavior only; it intentionally omits roadmap content.
+- This README documents current behavior only and omits roadmap sections by design.
