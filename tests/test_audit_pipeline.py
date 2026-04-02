@@ -65,20 +65,20 @@ class FakeRealRL:
         }
 
 
-class FakeRealFSDP:
+class FakeRealTeacherFT:
     mode = "real"
 
     def run(self, *, cfg, teacher_payload, actual_cost_usd):
         _ = (cfg, actual_cost_usd, teacher_payload)
         return {
             "model": "meta-llama/Llama-3.1-8B",
-            "stage": "fsdp",
+            "stage": "teacher_ft",
             "quality_score": 0.76,
             "stability_score": 0.90,
-            "checkpoint_path": "tinker://checkpoints/fsdp-1",
-            "run_id": "run-fsdp-1",
-            "_prompt_traces": [_fake_trace(stage="fsdp", model_label="teacher", row_id="fsdp-1")],
-            REAL_USAGE_KEY: _usage(run_id="run-fsdp-1", stage="fsdp", cost_usd=0.2002),
+            "checkpoint_path": "tinker://checkpoints/teacher_ft-1",
+            "run_id": "run-teacher_ft-1",
+            "_prompt_traces": [_fake_trace(stage="teacher_ft", model_label="teacher", row_id="teacher_ft-1")],
+            REAL_USAGE_KEY: _usage(run_id="run-teacher_ft-1", stage="teacher_ft", cost_usd=0.2002),
         }
 
 
@@ -132,7 +132,7 @@ class FakeRealEval:
             },
             "training_stability": {
                 "rl": {"stability_score": 0.91, "nan_events": 0},
-                "fsdp": {"stability_score": 0.89, "nan_events": 0},
+                "teacher_ft": {"stability_score": 0.89, "nan_events": 0},
                 "distill": {"stability_score": 0.88, "nan_events": 0},
             },
             "_prompt_traces": [
@@ -150,7 +150,7 @@ def _patch_fake_real_adapters(monkeypatch: pytest.MonkeyPatch) -> None:
         "inference_projects.pipeline.select_stage_adapters",
         lambda mode: StageAdapters(
             rl=FakeRealRL(),
-            fsdp=FakeRealFSDP(),
+            teacher_ft=FakeRealTeacherFT(),
             distill=FakeRealDistill(),
             eval=FakeRealEval(),
         ),
@@ -167,7 +167,7 @@ def test_real_all_writes_audit_bundle(tmp_path: Path, monkeypatch: pytest.Monkey
 
     assert (state_dir / "artifacts/audit/run_manifest.json").exists()
     assert (state_dir / "artifacts/audit/stage_rl.json").exists()
-    assert (state_dir / "artifacts/audit/stage_fsdp.json").exists()
+    assert (state_dir / "artifacts/audit/stage_teacher_ft.json").exists()
     assert (state_dir / "artifacts/audit/stage_distill.json").exists()
     assert (state_dir / "artifacts/audit/stage_eval.json").exists()
     assert (state_dir / "artifacts/audit/eval_rows.jsonl").exists()

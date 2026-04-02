@@ -15,7 +15,7 @@ from inference_projects.tinker_runtime import (
     continue_from_checkpoint,
     create_lora_checkpoint,
     load_canary_prompts,
-    run_real_fsdp,
+    run_real_teacher_ft,
     run_real_distill,
     run_real_rl,
 )
@@ -148,7 +148,7 @@ def test_continue_from_checkpoint_uses_sampler_weights_save(monkeypatch):
     checkpoint = continue_from_checkpoint(
         service=FakeService(),
         checkpoint_path="tinker://x/weights/y",
-        stage="fsdp",
+        stage="teacher_ft",
         poll_interval_seconds=1,
         timeout_seconds=1,
     )
@@ -339,13 +339,13 @@ def test_run_real_rl_records_training_metadata(monkeypatch):
     assert result["usage"]["train_tokens"] == 12
 
 
-def test_run_real_fsdp_records_training_metadata(monkeypatch):
+def test_run_real_teacher_ft_records_training_metadata(monkeypatch):
     cfg = load_config()
     cfg = replace(cfg, evaluation=replace(cfg.evaluation, prompt_limit=2))
 
     class FakeTrainClient:
         def get_info(self):
-            return type("Info", (), {"model_id": "run-fsdp"})()
+            return type("Info", (), {"model_id": "run-teacher_ft"})()
 
     class FakeService:
         def create_training_client_from_state_with_optimizer(self, checkpoint_path, user_metadata=None):
@@ -373,9 +373,9 @@ def test_run_real_fsdp_records_training_metadata(monkeypatch):
     monkeypatch.setattr(
         "inference_projects.tinker_runtime._save_training_checkpoints",
         lambda **kwargs: TrainingCheckpoint(
-            run_id="run-fsdp",
-            checkpoint_path="tinker://ckpt/fsdp",
-            sampler_checkpoint_path="tinker://sampler/fsdp",
+            run_id="run-teacher_ft",
+            checkpoint_path="tinker://ckpt/teacher_ft",
+            sampler_checkpoint_path="tinker://sampler/teacher_ft",
         ),
     )
     monkeypatch.setattr(
@@ -389,7 +389,7 @@ def test_run_real_fsdp_records_training_metadata(monkeypatch):
         ),
     )
 
-    result = run_real_fsdp(
+    result = run_real_teacher_ft(
         cfg=cfg,
         teacher_payload={
             "checkpoint_path": "tinker://ckpt/rl",
@@ -399,7 +399,7 @@ def test_run_real_fsdp_records_training_metadata(monkeypatch):
         },
     )
     assert result["payload"]["training"]["steps"] == 4
-    assert result["payload"]["fsdp_nan_events"] == 1
+    assert result["payload"]["teacher_ft_nan_events"] == 1
     assert result["usage"]["train_tokens"] == 16
 
 
@@ -463,8 +463,8 @@ def test_run_real_distill_uses_scaled_training_data(monkeypatch):
     result = run_real_distill(
         cfg=cfg,
         teacher_payload={
-            "checkpoint_path": "tinker://ckpt/fsdp",
-            "sampler_checkpoint_path": "tinker://sampler/fsdp",
+            "checkpoint_path": "tinker://ckpt/teacher_ft",
+            "sampler_checkpoint_path": "tinker://sampler/teacher_ft",
             "quality_score": 0.8,
         },
     )

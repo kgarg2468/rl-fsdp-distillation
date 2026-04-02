@@ -54,19 +54,19 @@ class FakeRealRL:
         }
 
 
-class FakeRealFSDP:
+class FakeRealTeacherFT:
     mode = "real"
 
     def run(self, *, cfg, teacher_payload, actual_cost_usd):
         _ = (teacher_payload, actual_cost_usd)
         return {
             "model": cfg.teacher_model,
-            "stage": "fsdp",
+            "stage": "teacher_ft",
             "quality_score": 0.72,
             "stability_score": 0.90,
-            "checkpoint_path": f"tinker://ckpt/fsdp/{cfg.seed}",
-            "sampler_checkpoint_path": f"tinker://sampler/fsdp/{cfg.seed}",
-            REAL_USAGE_KEY: _usage(stage="fsdp", seed=cfg.seed, cost_usd=0.0102),
+            "checkpoint_path": f"tinker://ckpt/teacher_ft/{cfg.seed}",
+            "sampler_checkpoint_path": f"tinker://sampler/teacher_ft/{cfg.seed}",
+            REAL_USAGE_KEY: _usage(stage="teacher_ft", seed=cfg.seed, cost_usd=0.0102),
         }
 
 
@@ -155,7 +155,7 @@ class FakeRealEval:
             },
             "training_stability": {
                 "rl": {"stability_score": 0.91, "nan_events": 0},
-                "fsdp": {"stability_score": 0.89, "nan_events": 0},
+                "teacher_ft": {"stability_score": 0.89, "nan_events": 0},
                 "distill": {"stability_score": 0.88, "nan_events": 0},
             },
             "integrity": {
@@ -179,7 +179,7 @@ def _patch_fake_real_adapters(
         "inference_projects.pipeline.select_stage_adapters",
         lambda mode: StageAdapters(
             rl=FakeRealRL(),
-            fsdp=FakeRealFSDP(),
+            teacher_ft=FakeRealTeacherFT(),
             distill=FakeRealDistill(),
             eval=FakeRealEval(
                 student_score_for_seed=student_score_for_seed,
@@ -328,7 +328,7 @@ def test_campaign_emits_summary_on_failure_and_resumes(tmp_path: Path, monkeypat
         "inference_projects.pipeline.select_stage_adapters",
         lambda mode: StageAdapters(
             rl=FakeRealRL(),
-            fsdp=FakeRealFSDP(),
+            teacher_ft=FakeRealTeacherFT(),
             distill=BrokenDistill(),
             eval=FakeRealEval(student_score_for_seed=lambda seed: 0.35),
         ),
@@ -339,23 +339,23 @@ def test_campaign_emits_summary_on_failure_and_resumes(tmp_path: Path, monkeypat
     assert failed_summary["campaign_status"] == "failed"
     assert failed_summary["failure_class"] in {"failed", "invariant_failed", "transient_exhausted", "stalled"}
 
-    call_counts = {"rl": 0, "fsdp": 0}
+    call_counts = {"rl": 0, "teacher_ft": 0}
 
     class CountRL(FakeRealRL):
         def run(self, *, cfg, actual_cost_usd):
             call_counts["rl"] += 1
             return super().run(cfg=cfg, actual_cost_usd=actual_cost_usd)
 
-    class CountFSDP(FakeRealFSDP):
+    class CountTeacherFT(FakeRealTeacherFT):
         def run(self, *, cfg, teacher_payload, actual_cost_usd):
-            call_counts["fsdp"] += 1
+            call_counts["teacher_ft"] += 1
             return super().run(cfg=cfg, teacher_payload=teacher_payload, actual_cost_usd=actual_cost_usd)
 
     monkeypatch.setattr(
         "inference_projects.pipeline.select_stage_adapters",
         lambda mode: StageAdapters(
             rl=CountRL(),
-            fsdp=CountFSDP(),
+            teacher_ft=CountTeacherFT(),
             distill=FakeRealDistill(),
             eval=FakeRealEval(student_score_for_seed=lambda seed: 0.35),
         ),
@@ -363,7 +363,7 @@ def test_campaign_emits_summary_on_failure_and_resumes(tmp_path: Path, monkeypat
     summary = run_pipeline_command("campaign", mode="real", state_dir=state_dir, config_path=cfg_path)
     assert summary is not None
     assert call_counts["rl"] == 1
-    assert call_counts["fsdp"] == 1
+    assert call_counts["teacher_ft"] == 1
 
 
 def test_campaign_stall_timeout_marks_failed_and_emits_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -385,7 +385,7 @@ def test_campaign_stall_timeout_marks_failed_and_emits_summary(tmp_path: Path, m
         "inference_projects.pipeline.select_stage_adapters",
         lambda mode: StageAdapters(
             rl=SlowRL(),
-            fsdp=FakeRealFSDP(),
+            teacher_ft=FakeRealTeacherFT(),
             distill=FakeRealDistill(),
             eval=FakeRealEval(student_score_for_seed=lambda seed: 0.35),
         ),

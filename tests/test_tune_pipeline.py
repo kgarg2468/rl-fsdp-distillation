@@ -54,19 +54,19 @@ class FakeRealRL:
         }
 
 
-class FakeRealFSDP:
+class FakeRealTeacherFT:
     mode = "real"
 
     def run(self, *, cfg, teacher_payload, actual_cost_usd):
         _ = (teacher_payload, actual_cost_usd)
         return {
             "model": cfg.teacher_model,
-            "stage": "fsdp",
+            "stage": "teacher_ft",
             "quality_score": 0.72,
             "stability_score": 0.90,
-            "checkpoint_path": f"tinker://ckpt/fsdp/{cfg.seed}",
-            "sampler_checkpoint_path": f"tinker://sampler/fsdp/{cfg.seed}",
-            REAL_USAGE_KEY: _usage(stage="fsdp", seed=cfg.seed, cost_usd=0.0102),
+            "checkpoint_path": f"tinker://ckpt/teacher_ft/{cfg.seed}",
+            "sampler_checkpoint_path": f"tinker://sampler/teacher_ft/{cfg.seed}",
+            REAL_USAGE_KEY: _usage(stage="teacher_ft", seed=cfg.seed, cost_usd=0.0102),
         }
 
 
@@ -162,7 +162,7 @@ class FakeRealEval:
             },
             "training_stability": {
                 "rl": {"stability_score": 0.91, "nan_events": 0},
-                "fsdp": {"stability_score": 0.89, "nan_events": 0},
+                "teacher_ft": {"stability_score": 0.89, "nan_events": 0},
                 "distill": {"stability_score": 0.88, "nan_events": 0},
             },
             "integrity": {
@@ -181,7 +181,7 @@ def _patch_fake_real_adapters(monkeypatch: pytest.MonkeyPatch, *, regime: Litera
         "inference_projects.pipeline.select_stage_adapters",
         lambda mode: StageAdapters(
             rl=FakeRealRL(),
-            fsdp=FakeRealFSDP(),
+            teacher_ft=FakeRealTeacherFT(),
             distill=FakeRealDistill(),
             eval=FakeRealEval(regime=regime),
         ),

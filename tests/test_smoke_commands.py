@@ -6,7 +6,7 @@ from inference_projects.pipeline import run_pipeline_command
 def test_stage_by_stage_smoke(tmp_path: Path):
     state_dir = tmp_path / "state"
     run_pipeline_command("rl", state_dir=state_dir)
-    run_pipeline_command("fsdp", state_dir=state_dir)
+    run_pipeline_command("teacher_ft", state_dir=state_dir)
     run_pipeline_command("distill", state_dir=state_dir)
     run_pipeline_command("eval", state_dir=state_dir)
     run_pipeline_command("report", state_dir=state_dir)

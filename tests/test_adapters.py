@@ -1,7 +1,7 @@
 import pytest
 
 from inference_projects import adapters
-from inference_projects.adapters import RealDistillAdapter, RealEvalAdapter, RealFSDPAdapter, RealRLAdapter, select_stage_adapters
+from inference_projects.adapters import RealDistillAdapter, RealEvalAdapter, RealTeacherFTAdapter, RealRLAdapter, select_stage_adapters
 from inference_projects.config import load_config
 from inference_projects.preflight import run_preflight
 from inference_projects.tinker_runtime import REAL_USAGE_KEY
@@ -10,7 +10,7 @@ from inference_projects.tinker_runtime import REAL_USAGE_KEY
 def test_select_stage_adapters_for_mock_mode():
     adapters = select_stage_adapters("mock")
     assert adapters.rl.mode == "mock"
-    assert adapters.fsdp.mode == "mock"
+    assert adapters.teacher_ft.mode == "mock"
     assert adapters.distill.mode == "mock"
     assert adapters.eval.mode == "mock"
 
@@ -18,7 +18,7 @@ def test_select_stage_adapters_for_mock_mode():
 def test_select_stage_adapters_for_real_mode():
     adapters = select_stage_adapters("real")
     assert adapters.rl.mode == "real"
-    assert adapters.fsdp.mode == "real"
+    assert adapters.teacher_ft.mode == "real"
     assert adapters.distill.mode == "real"
     assert adapters.eval.mode == "real"
 
@@ -82,27 +82,27 @@ def test_real_rl_adapter_returns_schema_payload_with_usage(monkeypatch: pytest.M
     assert REAL_USAGE_KEY in payload
 
 
-def test_real_fsdp_adapter_returns_schema_payload_with_usage(monkeypatch: pytest.MonkeyPatch):
+def test_real_teacher_ft_adapter_returns_schema_payload_with_usage(monkeypatch: pytest.MonkeyPatch):
     cfg = load_config()
     monkeypatch.setattr(
         adapters,
-        "run_real_fsdp",
+        "run_real_teacher_ft",
         lambda *, cfg, teacher_payload: {
             "payload": {
                 "model": cfg.teacher_model,
-                "stage": "fsdp",
+                "stage": "teacher_ft",
                 "quality_score": float(teacher_payload["quality_score"]) + 0.01,
                 "stability_score": 0.90,
             },
             "usage": _usage_stub(),
         },
     )
-    payload = RealFSDPAdapter().run(
+    payload = RealTeacherFTAdapter().run(
         cfg=cfg,
         teacher_payload={"quality_score": 0.71},
         actual_cost_usd=0.0,
     )
-    assert payload["stage"] == "fsdp"
+    assert payload["stage"] == "teacher_ft"
     assert isinstance(payload["quality_score"], float)
     assert isinstance(payload["stability_score"], float)
     assert REAL_USAGE_KEY in payload
@@ -165,7 +165,7 @@ def test_real_eval_adapter_returns_schema_payload_with_usage(monkeypatch: pytest
                 },
                 "training_stability": {
                     "rl": {"stability_score": 0.91, "nan_events": 0},
-                    "fsdp": {"stability_score": 0.89, "nan_events": 0},
+                    "teacher_ft": {"stability_score": 0.89, "nan_events": 0},
                     "distill": {"stability_score": 0.88, "nan_events": 0},
                 },
             },

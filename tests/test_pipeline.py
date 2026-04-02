@@ -86,7 +86,7 @@ def test_real_mode_uses_adapter_usage_for_ledger(tmp_path: Path, monkeypatch: py
                 },
             }
 
-    class NoopFSDP:
+    class NoopTeacherFT:
         mode = "real"
 
         def run(self, *, cfg, teacher_payload, actual_cost_usd):
@@ -108,7 +108,7 @@ def test_real_mode_uses_adapter_usage_for_ledger(tmp_path: Path, monkeypatch: py
         "inference_projects.pipeline.select_stage_adapters",
         lambda mode: StageAdapters(
             rl=FakeRealRL(),
-            fsdp=NoopFSDP(),
+            teacher_ft=NoopTeacherFT(),
             distill=NoopDistill(),
             eval=NoopEval(),
         ),
@@ -138,7 +138,7 @@ def test_real_mode_missing_usage_fails(tmp_path: Path, monkeypatch: pytest.Monke
                 "stability_score": 0.92,
             }
 
-    class NoopFSDP:
+    class NoopTeacherFT:
         mode = "real"
 
         def run(self, *, cfg, teacher_payload, actual_cost_usd):
@@ -160,7 +160,7 @@ def test_real_mode_missing_usage_fails(tmp_path: Path, monkeypatch: pytest.Monke
         "inference_projects.pipeline.select_stage_adapters",
         lambda mode: StageAdapters(
             rl=BadRealRL(),
-            fsdp=NoopFSDP(),
+            teacher_ft=NoopTeacherFT(),
             distill=NoopDistill(),
             eval=NoopEval(),
         ),
@@ -173,7 +173,11 @@ def test_campaign_runs_without_prior_ledger(tmp_path: Path, monkeypatch: pytest.
     state_dir = tmp_path / "state"
     monkeypatch.setattr(
         "inference_projects.pipeline.run_campaign",
-        lambda *, cfg, mode, state_dir: {"executed_seeds": [17], "mode": mode, "state_dir": str(state_dir)},
+        lambda *, cfg, mode, state_dir, **kwargs: {
+            "executed_seeds": [17],
+            "mode": mode,
+            "state_dir": str(state_dir),
+        },
     )
     summary = run_pipeline_command("campaign", mode="real", state_dir=state_dir)
     assert summary is not None
@@ -184,7 +188,7 @@ def test_tune_runs_without_prior_ledger(tmp_path: Path, monkeypatch: pytest.Monk
     state_dir = tmp_path / "state"
     monkeypatch.setattr(
         "inference_projects.pipeline.run_tune",
-        lambda *, cfg, mode, state_dir: {
+        lambda *, cfg, mode, state_dir, **kwargs: {
             "status": "ok",
             "mode": mode,
             "state_dir": str(state_dir),

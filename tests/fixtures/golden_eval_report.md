@@ -1,4 +1,4 @@
-# RL + FSDP + Distillation Eval Report
+# RL + Teacher FT + Distillation Eval Report
 
 ## Run Metadata
 - Run mode: mock
@@ -27,11 +27,11 @@
 
 ## Training Stability
 - RL stability score: 0.91 (NaN events: 0)
-- FSDP stability score: 0.89 (NaN events: 0)
+- Teacher FT stability score: 0.89 (NaN events: 0)
 - Distill stability score: 0.9 (NaN events: 0)
 
 ## Stage Spend
 - rl: $7.89
-- fsdp: $5.24
+- teacher_ft: $5.24
 - distill: $4.71
 - eval: $1.20
