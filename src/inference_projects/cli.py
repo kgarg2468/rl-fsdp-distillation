@@ -25,17 +25,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=".",
         help="Directory where artifacts are written (default: current project root).",
     )
-    parser.add_argument(
-        "--prior-ledger",
-        default=None,
-        help="Optional path to a previous ledger.json used to seed prior spend for campaign budget checks.",
-    )
-    parser.add_argument(
-        "--project-hard-cap-usd",
-        type=float,
-        default=35.0,
-        help="Project-level hard cap for campaign runs, including prior spend.",
-    )
     return parser
 
 
@@ -47,8 +36,6 @@ def main() -> None:
         mode=args.mode,
         config_path=Path(args.config),
         state_dir=Path(args.state_dir),
-        prior_ledger=Path(args.prior_ledger) if args.prior_ledger else None,
-        project_hard_cap_usd=float(args.project_hard_cap_usd),
     )
     if result is not None:
         print(json.dumps(result, indent=2))
