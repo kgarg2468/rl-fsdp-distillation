@@ -70,7 +70,55 @@ Guardrails currently enforced in code:
 
 ## Runbook (Make + CLI)
 
-_Work in progress in this commit: section scaffold only._
+### Setup
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -e '.[dev]'
+```
+
+### Make Targets
+
+```bash
+make preflight MODE=mock
+make dryrun MODE=mock
+make rl MODE=mock
+make teacher_ft MODE=mock
+make distill MODE=mock
+make eval MODE=mock
+make report MODE=mock
+make all MODE=mock
+make campaign MODE=real CONFIG=config/default.toml STATE_DIR=/abs/path/to/state PRIOR_LEDGER=/abs/path/to/ledger.json
+make tune MODE=mock
+```
+
+Convenience runners:
+
+```bash
+make run-dir
+make all-run MODE=mock
+make campaign-run MODE=real CONFIG=config/default.toml PROJECT_HARD_CAP_USD=35.0
+```
+
+### CLI Equivalents
+
+```bash
+STATE_DIR="$(python3 scripts/allocate_run_dir.py --root runs)"
+python3 -m inference_projects.cli preflight --mode mock --config config/default.toml --state-dir "$STATE_DIR"
+python3 -m inference_projects.cli dryrun --mode mock --config config/default.toml --state-dir "$STATE_DIR"
+python3 -m inference_projects.cli all --mode mock --config config/default.toml --state-dir "$STATE_DIR"
+python3 -m inference_projects.cli tune --mode mock --config config/default.toml --state-dir "$STATE_DIR"
+```
+
+Real mode setup:
+
+```bash
+set -a && source .env && set +a
+STATE_DIR="$(python3 scripts/allocate_run_dir.py --root runs)"
+python3 -m inference_projects.cli preflight --mode real --config config/default.toml --state-dir "$STATE_DIR"
+python3 -m inference_projects.cli campaign --mode real --config config/default.toml --state-dir "$STATE_DIR" --project-hard-cap-usd 35.0
+```
 
 ## Artifacts & Run Directory Model
 
