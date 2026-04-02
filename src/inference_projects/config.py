@@ -58,6 +58,7 @@ class EvaluationConfig:
 
 @dataclass(frozen=True)
 class DistillationConfig:
+    training_prompt_limit: int
     teacher_prompt_template: str
     filter_profile: str
     hard_example_ratio: float
@@ -157,6 +158,8 @@ def _validate_evaluation(evaluation: EvaluationConfig) -> None:
 
 
 def _validate_distillation(distillation: DistillationConfig) -> None:
+    if distillation.training_prompt_limit <= 0:
+        raise ValueError("distillation.training_prompt_limit must be > 0")
     if distillation.teacher_prompt_template not in {"raw", "numeric_strict"}:
         raise ValueError("distillation.teacher_prompt_template must be 'raw' or 'numeric_strict'")
     if distillation.filter_profile not in {"moderate", "strict"}:
@@ -284,6 +287,7 @@ def load_config(path: Path | str = Path("config/default.toml")) -> ProjectConfig
 
     distillation_raw = data.get("distillation", {})
     distillation = DistillationConfig(
+        training_prompt_limit=int(distillation_raw.get("training_prompt_limit", 150)),
         teacher_prompt_template=str(distillation_raw.get("teacher_prompt_template", "raw")),
         filter_profile=str(distillation_raw.get("filter_profile", "moderate")),
         hard_example_ratio=float(distillation_raw.get("hard_example_ratio", 0.4)),

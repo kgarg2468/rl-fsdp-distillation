@@ -16,6 +16,7 @@ from inference_projects.tinker_runtime import (
     create_lora_checkpoint,
     load_canary_prompts,
     run_real_fsdp,
+    run_real_distill,
     run_real_rl,
 )
 
@@ -337,3 +338,74 @@ def test_run_real_fsdp_records_training_metadata(monkeypatch):
     assert result["payload"]["training"]["steps"] == 4
     assert result["payload"]["fsdp_nan_events"] == 1
     assert result["usage"]["train_tokens"] == 16
+
+
+def test_run_real_distill_uses_scaled_training_data(monkeypatch):
+    cfg = load_config()
+    cfg = replace(cfg, distillation=replace(cfg.distillation, training_prompt_limit=3))
+
+    class FakeTrainClient:
+        def get_info(self):
+            return type("Info", (), {"model_id": "run-distill"})()
+
+    class FakeService:
+        def create_lora_training_client(self, **kwargs):
+            _ = kwargs
+            return FakeTrainClient()
+
+    rows = [
+        type("PromptRow", (), {"row_id": "r1", "prompt": "1+1", "reference": "2"})(),
+        type("PromptRow", (), {"row_id": "r2", "prompt": "2+2", "reference": "4"})(),
+        type("PromptRow", (), {"row_id": "r3", "prompt": "3+3", "reference": "6"})(),
+    ]
+    monkeypatch.setattr("inference_projects.tinker_runtime.build_service_client", lambda: FakeService())
+    monkeypatch.setattr("inference_projects.tinker_runtime.load_canary_prompts", lambda **kwargs: rows)
+    monkeypatch.setattr(
+        "inference_projects.tinker_runtime._run_training_loop",
+        lambda **kwargs: {
+            "steps": 5,
+            "batches_per_epoch": 2,
+            "nan_events": 0,
+            "loss_trace": [0.8, 0.6],
+            "train_tokens": 20,
+        },
+    )
+    monkeypatch.setattr(
+        "inference_projects.tinker_runtime._save_training_checkpoints",
+        lambda **kwargs: TrainingCheckpoint(
+            run_id="run-distill",
+            checkpoint_path="tinker://ckpt/distill",
+            sampler_checkpoint_path="tinker://sampler/distill",
+        ),
+    )
+
+    def fake_sample_prompts(**kwargs):
+        label = kwargs["model_label"]
+        if label == "teacher":
+            outputs = ["2", "4", "6"]
+            return SamplingBatch(outputs=outputs, prefill_tokens=10, sample_tokens=3, session_id="teacher", trace_rows=[])
+        if label == "baseline":
+            outputs = ["1", "4", "0"]
+            return SamplingBatch(outputs=outputs, prefill_tokens=9, sample_tokens=3, session_id="baseline", trace_rows=[])
+        return SamplingBatch(
+            outputs=["2", "4", "6"],
+            prefill_tokens=8,
+            sample_tokens=3,
+            session_id="student",
+            trace_rows=[],
+        )
+
+    monkeypatch.setattr("inference_projects.tinker_runtime.sample_prompts", fake_sample_prompts)
+
+    result = run_real_distill(
+        cfg=cfg,
+        teacher_payload={
+            "checkpoint_path": "tinker://ckpt/fsdp",
+            "sampler_checkpoint_path": "tinker://sampler/fsdp",
+            "quality_score": 0.8,
+        },
+    )
+    assert result["payload"]["training"]["steps"] == 5
+    assert result["payload"]["distillation_config"]["training_prompt_limit"] == 3
+    assert result["payload"]["distill_dataset"]["total_rows"] == 3
+    assert result["usage"]["train_tokens"] == 20

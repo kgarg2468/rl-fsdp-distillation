@@ -54,6 +54,7 @@ teacher_integrity_refusal_threshold = 0.30
 teacher_integrity_min_score = 0.10
 
 [distillation]
+training_prompt_limit = 150
 teacher_prompt_template = "raw"
 filter_profile = "moderate"
 hard_example_ratio = 0.4

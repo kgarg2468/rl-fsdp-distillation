@@ -28,6 +28,7 @@ def test_real_canary_config_loads_successfully():
     assert cfg.evaluation.max_tokens_eval > 0
     assert cfg.evaluation.eval_temperature == 0.0
     assert cfg.evaluation.eval_max_tokens_candidates == (48, 96)
+    assert cfg.distillation.training_prompt_limit == 150
     assert cfg.distillation.filter_profile == "moderate"
     assert cfg.distillation.lora_rank == 8
     assert cfg.campaign.seeds == (17, 29, 43)
