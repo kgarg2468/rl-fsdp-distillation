@@ -12,7 +12,7 @@ This repository orchestrates staged training/evaluation workflows with strict sp
 | --- | --- | --- |
 | Staged command pipeline | Runs `rl`, `teacher_ft`, `distill`, `eval`, `report`, `all`, `smoke`, `preflight`, `dryrun`, `campaign`, and `tune`. | `src/inference_projects/cli.py`, `src/inference_projects/pipeline.py` |
 | Runtime adapter split | Uses deterministic local adapters in `mock` mode and Tinker-backed adapters in `real` mode. | `src/inference_projects/adapters.py` |
-| Budget enforcement | Computes projected per-stage and total spend; enforces stage budgets and hard caps. | `src/inference_projects/budget.py`, `src/inference_projects/preflight.py`, `config/default.toml` |
+| Budget telemetry and gating | Computes projected per-stage/total spend, emits warning-band checks, and enforces campaign/tuning run-cap constraints. | `src/inference_projects/budget.py`, `src/inference_projects/preflight.py`, `src/inference_projects/pipeline.py`, `config/default.toml` |
 | Ledger accounting | Writes cumulative spend/tokens and stage records to ledger artifacts. | `src/inference_projects/ledger.py`, `src/inference_projects/pipeline.py` |
 | Artifact contracts | Validates checkpoint/eval/ledger/audit payloads against schema checks before write. | `src/inference_projects/schemas.py` |
 | Audit bundle | Emits run manifest, per-stage audit payloads, eval row evidence, and an audit markdown report. | `src/inference_projects/audit.py`, `src/inference_projects/pipeline.py` |
@@ -190,7 +190,7 @@ What is covered:
 Recommended quick doc sanity checks after README edits:
 
 ```bash
-rg -n \"planned|PPO|GRPO|DPO|Axolotl launcher\" README.md
+rg -n \"planned|PPO|GRPO|DPO\" README.md
 rg -n \"tune|campaign|preflight|dryrun\" README.md
 ```
 
