@@ -1,5 +1,5 @@
 [project]
-name = "RL + FSDP + Distillation (Real Canary)"
+name = "RL + Teacher FT + Distillation (Real Canary)"
 seed = 42
 
 [token_rates_per_million]
@@ -11,9 +11,9 @@ train = 0.40
 rl_prefill = 500000
 rl_sample = 1500000
 rl_train = 500000
-fsdp_prefill = 400000
-fsdp_sample = 1000000
-fsdp_train = 500000
+teacher_ft_prefill = 400000
+teacher_ft_sample = 1000000
+teacher_ft_train = 500000
 distill_prefill = 400000
 distill_sample = 1200000
 distill_train = 300000

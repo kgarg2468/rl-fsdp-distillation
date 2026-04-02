@@ -49,7 +49,7 @@ class Ledger:
 def new_ledger() -> Ledger:
     return Ledger(
         total_spend_usd=0.0,
-        stage_spend_usd={"rl": 0.0, "fsdp": 0.0, "distill": 0.0, "eval": 0.0},
+        stage_spend_usd={"rl": 0.0, "teacher_ft": 0.0, "distill": 0.0, "eval": 0.0},
         token_totals=TokenUsage(prefill=0, sample=0, train=0),
         records=[],
     )

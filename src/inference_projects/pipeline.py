@@ -15,7 +15,7 @@ from inference_projects import tuning as tuning_utils
 from inference_projects.adapters import (
     DistillStageAdapter,
     EvalStageAdapter,
-    FSDPStageAdapter,
+    TeacherFTStageAdapter,
     RLStageAdapter,
     select_stage_adapters,
 )
@@ -34,7 +34,7 @@ from inference_projects.tinker_runtime import EVAL_ROWS_KEY, PROMPT_TRACES_KEY
 
 SUPPORTED_COMMANDS = {
     "rl",
-    "fsdp",
+    "teacher_ft",
     "distill",
     "eval",
     "report",
@@ -170,8 +170,8 @@ def run_pipeline_command(
 
     if command == "rl":
         run_rl(cfg, paths, adapter=adapters.rl, mode=resolved_mode, preflight=preflight_result)
-    elif command == "fsdp":
-        run_fsdp(cfg, paths, adapter=adapters.fsdp, mode=resolved_mode, preflight=preflight_result)
+    elif command == "teacher_ft":
+        run_teacher_ft(cfg, paths, adapter=adapters.teacher_ft, mode=resolved_mode, preflight=preflight_result)
     elif command == "distill":
         run_distill(cfg, paths, adapter=adapters.distill, mode=resolved_mode, preflight=preflight_result)
     elif command == "eval":
@@ -180,7 +180,7 @@ def run_pipeline_command(
         run_report(cfg, paths, mode=resolved_mode, preflight=preflight_result)
     elif command == "all":
         run_rl(cfg, paths, adapter=adapters.rl, mode=resolved_mode, preflight=preflight_result)
-        run_fsdp(cfg, paths, adapter=adapters.fsdp, mode=resolved_mode, preflight=preflight_result)
+        run_teacher_ft(cfg, paths, adapter=adapters.teacher_ft, mode=resolved_mode, preflight=preflight_result)
         run_distill(cfg, paths, adapter=adapters.distill, mode=resolved_mode, preflight=preflight_result)
         run_eval(cfg, paths, adapter=adapters.eval, mode=resolved_mode, preflight=preflight_result)
         run_report(cfg, paths, mode=resolved_mode, preflight=preflight_result)
@@ -317,7 +317,7 @@ def _run_with_watchdog(
 def _campaign_required_artifacts(paths: PipelinePaths, stage: str) -> list[Path]:
     if stage == "rl":
         return [paths.teacher_ckpt]
-    if stage == "fsdp":
+    if stage == "teacher_ft":
         return [paths.teacher_ckpt]
     if stage == "distill":
         return [paths.student_ckpt]
@@ -474,8 +474,8 @@ def run_campaign(
                     def _stage_call() -> None:
                         if stage == "rl":
                             run_rl(run_cfg, run_paths, adapter=adapters.rl, mode=mode, preflight=preflight_result)
-                        elif stage == "fsdp":
-                            run_fsdp(run_cfg, run_paths, adapter=adapters.fsdp, mode=mode, preflight=preflight_result)
+                        elif stage == "teacher_ft":
+                            run_teacher_ft(run_cfg, run_paths, adapter=adapters.teacher_ft, mode=mode, preflight=preflight_result)
                         elif stage == "distill":
                             run_distill(
                                 run_cfg,
@@ -1293,8 +1293,8 @@ def _run_tune_candidate(
             def _stage_call() -> None:
                 if stage == "rl":
                     run_rl(run_cfg, run_paths, adapter=adapters.rl, mode=mode, preflight=preflight_result)
-                elif stage == "fsdp":
-                    run_fsdp(run_cfg, run_paths, adapter=adapters.fsdp, mode=mode, preflight=preflight_result)
+                elif stage == "teacher_ft":
+                    run_teacher_ft(run_cfg, run_paths, adapter=adapters.teacher_ft, mode=mode, preflight=preflight_result)
                 elif stage == "distill":
                     run_distill(run_cfg, run_paths, adapter=adapters.distill, mode=mode, preflight=preflight_result)
                 elif stage == "eval":
@@ -1397,7 +1397,7 @@ def _projected_and_actual_mock(stage: str, cfg: ProjectConfig) -> tuple[TokenUsa
     projected_tokens = budget.stage_token_usage(stage, cfg)
     projected_cost = budget.projected_stage_cost_usd(stage, cfg)
     # Keep actual spend under projection for predictable low-cost demo behavior.
-    actual_factor = {"rl": 0.94, "fsdp": 0.96, "distill": 0.93, "eval": 0.90}[stage]
+    actual_factor = {"rl": 0.94, "teacher_ft": 0.96, "distill": 0.93, "eval": 0.90}[stage]
     actual_tokens = TokenUsage(
         prefill=int(projected_tokens.prefill * actual_factor),
         sample=int(projected_tokens.sample * actual_factor),
@@ -1635,15 +1635,15 @@ def run_rl(
     _write_json(paths.teacher_ckpt, payload)
 
 
-def run_fsdp(
+def run_teacher_ft(
     cfg: ProjectConfig,
     paths: PipelinePaths,
     *,
-    adapter: FSDPStageAdapter,
+    adapter: TeacherFTStageAdapter,
     mode: str,
     preflight: PreflightResult,
 ) -> None:
-    stage = "fsdp"
+    stage = "teacher_ft"
     started_at = audit.utc_now_iso()
     started_monotonic = time.monotonic()
     ledger, projected_tokens, projected_cost = _stage_budget_check(stage, cfg, paths)
@@ -1921,13 +1921,13 @@ def _format_report(
             "",
             "## Training Stability",
             f"- RL stability score: {stability['rl']['stability_score']} (NaN events: {stability['rl']['nan_events']})",
-            f"- FSDP stability score: {stability['fsdp']['stability_score']} (NaN events: {stability['fsdp']['nan_events']})",
+            f"- Teacher FT stability score: {stability['teacher_ft']['stability_score']} (NaN events: {stability['teacher_ft']['nan_events']})",
             f"- Distill stability score: {stability['distill']['stability_score']} (NaN events: {stability['distill']['nan_events']})",
             "",
             "## Stage Spend",
         ]
     )
-    for stage in ("rl", "fsdp", "distill", "eval"):
+    for stage in ("rl", "teacher_ft", "distill", "eval"):
         lines.append(f"- {stage}: ${ledger.stage_spend_usd.get(stage, 0.0):.2f}")
     lines.append("")
     return "\n".join(lines)

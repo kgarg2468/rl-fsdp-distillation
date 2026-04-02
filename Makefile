@@ -6,7 +6,7 @@ PRIOR_LEDGER ?=
 PROJECT_HARD_CAP_USD ?= 35.0
 RUNS_ROOT ?= $(CURDIR)/runs
 
-.PHONY: install test rl fsdp distill eval report all smoke preflight dryrun campaign run-dir all-run campaign-run verify
+.PHONY: install test rl teacher_ft distill eval report all smoke preflight dryrun campaign run-dir all-run campaign-run verify
 
 install:
 	$(PYTHON) -m pip install -e .[dev]
@@ -17,8 +17,8 @@ test:
 rl:
 	$(PYTHON) -m inference_projects.cli rl --mode $(MODE) --config $(CONFIG) --state-dir $(STATE_DIR)
 
-fsdp:
-	$(PYTHON) -m inference_projects.cli fsdp --mode $(MODE) --config $(CONFIG) --state-dir $(STATE_DIR)
+teacher_ft:
+	$(PYTHON) -m inference_projects.cli teacher_ft --mode $(MODE) --config $(CONFIG) --state-dir $(STATE_DIR)
 
 distill:
 	$(PYTHON) -m inference_projects.cli distill --mode $(MODE) --config $(CONFIG) --state-dir $(STATE_DIR)

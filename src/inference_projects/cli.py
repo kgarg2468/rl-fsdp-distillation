@@ -8,10 +8,10 @@ from inference_projects.pipeline import run_pipeline_command
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="RL + FSDP + Distillation pipeline")
+    parser = argparse.ArgumentParser(description="RL + Teacher FT + Distillation pipeline")
     parser.add_argument(
         "command",
-        choices=["rl", "fsdp", "distill", "eval", "report", "all", "smoke", "preflight", "dryrun", "campaign", "tune"],
+        choices=["rl", "teacher_ft", "distill", "eval", "report", "all", "smoke", "preflight", "dryrun", "campaign", "tune"],
     )
     parser.add_argument(
         "--mode",

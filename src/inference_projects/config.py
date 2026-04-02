@@ -6,7 +6,7 @@ import tomllib
 
 from inference_projects.pricing import TokenUsage
 
-REQUIRED_STAGES = ("rl", "fsdp", "distill", "eval")
+REQUIRED_STAGES = ("rl", "teacher_ft", "distill", "eval")
 
 
 @dataclass(frozen=True)
