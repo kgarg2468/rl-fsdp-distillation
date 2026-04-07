@@ -1,8 +1,8 @@
 # RL + Teacher FT + Distillation
 
-**Budget-gated RL -> Teacher FT -> Distillation pipeline with reproducible artifacts for local mock runs and Tinker-backed real runs.**
+**RL -> Teacher FT -> Distillation pipeline with spend telemetry, reproducible artifacts, and support for local mock and Tinker-backed real runs.**
 
-This repository orchestrates staged training/evaluation workflows with strict spend controls, schema-validated artifacts, and auditable run outputs under a state directory (typically `runs/run-###`).
+This repository orchestrates staged training/evaluation workflows with non-blocking spend telemetry, schema-validated artifacts, and auditable run outputs under a state directory (typically `runs/run-###`).
 
 ---
 
@@ -12,7 +12,7 @@ This repository orchestrates staged training/evaluation workflows with strict sp
 | --- | --- | --- |
 | Staged command pipeline | Runs `rl`, `teacher_ft`, `distill`, `eval`, `report`, `all`, `smoke`, `preflight`, `dryrun`, `campaign`, and `tune`. | `src/inference_projects/cli.py`, `src/inference_projects/pipeline.py` |
 | Runtime adapter split | Uses deterministic local adapters in `mock` mode and Tinker-backed adapters in `real` mode. | `src/inference_projects/adapters.py` |
-| Budget telemetry and gating | Computes projected per-stage/total spend, emits warning-band checks, and enforces campaign/tuning run-cap constraints. | `src/inference_projects/budget.py`, `src/inference_projects/preflight.py`, `src/inference_projects/pipeline.py`, `config/default.toml` |
+| Budget telemetry | Computes projected per-stage/total spend and records realized stage spend in ledger/audit artifacts. | `src/inference_projects/budget.py`, `src/inference_projects/preflight.py`, `src/inference_projects/pipeline.py`, `config/default.toml` |
 | Ledger accounting | Writes cumulative spend/tokens and stage records to ledger artifacts. | `src/inference_projects/ledger.py`, `src/inference_projects/pipeline.py` |
 | Artifact contracts | Validates checkpoint/eval/ledger/audit payloads against schema checks before write. | `src/inference_projects/schemas.py` |
 | Audit bundle | Emits run manifest, per-stage audit payloads, eval row evidence, and an audit markdown report. | `src/inference_projects/audit.py`, `src/inference_projects/pipeline.py` |
@@ -64,8 +64,8 @@ flowchart TD
 Guardrails currently enforced in code:
 - `preflight` validates runtime mode, required env vars for `real`, and state-dir writability.
 - `dryrun` reports projected stage and cumulative spend from `token_caps` + `token_rates_per_million`.
-- Projection warnings are emitted when projected total is outside `runtime.projection_warning_min_usd` to `runtime.projection_warning_max_usd`.
-- Campaign and tuning flows enforce strict run caps (`campaign.strict_run_cap`, `tuning.strict_run_cap`).
+- Stage token budget caps and strict run caps are hard guardrails that block execution when exceeded.
+- Projection warning bands and prompt-limit fields remain informational telemetry inputs.
 - Real-mode payloads must include required usage fields (`prefill_tokens`, `sample_tokens`, `train_tokens`, `run_id`, `provider_raw`) before ledger/audit writes.
 
 ## Runbook (Make + CLI)
@@ -97,7 +97,7 @@ make distill MODE=mock
 make eval MODE=mock
 make report MODE=mock
 make all MODE=mock
-make campaign MODE=real CONFIG=config/default.toml STATE_DIR=/abs/path/to/state PRIOR_LEDGER=/abs/path/to/ledger.json
+make campaign MODE=real CONFIG=config/default.toml STATE_DIR=/abs/path/to/state
 make tune MODE=mock
 ```
 
@@ -106,7 +106,7 @@ Convenience runners:
 ```bash
 make run-dir
 make all-run MODE=mock
-make campaign-run MODE=real CONFIG=config/default.toml PROJECT_HARD_CAP_USD=35.0
+make campaign-run MODE=real CONFIG=config/default.toml
 ```
 
 ### CLI Equivalents
@@ -125,7 +125,7 @@ Real mode setup:
 set -a && source .env && set +a
 STATE_DIR="$(python3 scripts/allocate_run_dir.py --root runs)"
 python3 -m inference_projects.cli preflight --mode real --config config/default.toml --state-dir "$STATE_DIR"
-python3 -m inference_projects.cli campaign --mode real --config config/default.toml --state-dir "$STATE_DIR" --project-hard-cap-usd 35.0
+python3 -m inference_projects.cli campaign --mode real --config config/default.toml --state-dir "$STATE_DIR"
 ```
 
 ## Artifacts & Run Directory Model
@@ -175,11 +175,11 @@ Primary config file: `config/default.toml`.
 | `[token_rates_per_million]` | `prefill`, `sample`, `train` |
 | `[token_caps]` | Stage token caps for `rl`, `teacher_ft`, `distill`, `eval` |
 | `[models]` | `teacher`, `student`, `baseline` |
-| `[runtime]` | `default_mode`, projection warning band, `real_required_env`, retry/poll settings |
-| `[evaluation]` | Prompt fixture path, prompt limit, concurrency, eval token/temperature controls, integrity thresholds |
-| `[distillation]` | Prompt limits and KD/training hyperparameters used by tune/distill flow |
-| `[campaign]` | Seed list, run bounds, bootstrap reps, early-stop threshold, strict cap |
-| `[tuning]` | Stage prompt limits, sweep budget, acceptance gates, strict cap |
+| `[runtime]` | `default_mode`, projection telemetry fields, `real_required_env`, retry/poll settings |
+| `[evaluation]` | Prompt fixture path, concurrency, eval token/temperature controls, integrity thresholds |
+| `[distillation]` | Distillation/training hyperparameters used by tune/distill flow |
+| `[campaign]` | Seed list, run bounds, bootstrap reps, early-stop threshold |
+| `[tuning]` | Candidate sweep width, acceptance gates, and promotion controls |
 
 Canary profile for smaller real-mode runs: `config/real_canary.toml`.
 
