@@ -28,15 +28,10 @@ class FrozenPromptSlice:
 
 
 def freeze_prompt_slice(*, source_path: Path, frozen_path: Path, prompt_limit: int) -> FrozenPromptSlice:
+    if prompt_limit < 0:
+        raise ValueError("prompt_limit must be >= 0")
     rows = _load_jsonl_rows(source_path)
-    if prompt_limit <= 0:
-        raise ValueError("prompt_limit must be > 0")
-    if len(rows) < prompt_limit:
-        raise RuntimeError(
-            f"Prompt file has {len(rows)} rows, but required at least {prompt_limit}: {source_path}"
-        )
-
-    selected = rows[:prompt_limit]
+    selected = rows
     prompt_ids: list[str] = []
     seen: set[str] = set()
     for idx, row in enumerate(selected, start=1):
@@ -53,13 +48,14 @@ def freeze_prompt_slice(*, source_path: Path, frozen_path: Path, prompt_limit: i
 
     frozen_path.parent.mkdir(parents=True, exist_ok=True)
     frozen_path.write_text("\n".join(json.dumps(row) for row in selected) + "\n")
+    effective_limit = len(selected)
 
     return FrozenPromptSlice(
         source_path=str(source_path),
         frozen_path=str(frozen_path),
         sha256=_sha256_file(frozen_path),
-        rows=prompt_limit,
-        prompt_limit=prompt_limit,
+        rows=effective_limit,
+        prompt_limit=effective_limit,
         prompt_ids=prompt_ids,
     )
 
@@ -71,23 +67,28 @@ def freeze_prompt_slices(
     slice_size: int,
     num_slices: int,
 ) -> list[FrozenPromptSlice]:
-    if slice_size <= 0:
-        raise ValueError("slice_size must be > 0")
+    if slice_size < 0:
+        raise ValueError("slice_size must be >= 0")
     if num_slices <= 0:
         raise ValueError("num_slices must be > 0")
+    _ = slice_size  # cap-like prompt limits are telemetry-only
     rows = _load_jsonl_rows(source_path)
-    required = slice_size * num_slices
-    if len(rows) < required:
-        raise RuntimeError(f"Need at least {required} rows for {num_slices} slices of size {slice_size}: {source_path}")
+    if not rows:
+        raise RuntimeError(f"Prompt file has no rows: {source_path}")
+
+    actual_slices = min(num_slices, len(rows))
+    base_size, remainder = divmod(len(rows), actual_slices)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     slices: list[FrozenPromptSlice] = []
-    for idx in range(num_slices):
-        start = idx * slice_size
-        end = start + slice_size
+    start = 0
+    for idx in range(actual_slices):
+        current_size = base_size + (1 if idx < remainder else 0)
+        end = start + current_size
+        chunk = rows[start:end]
         frozen_path = output_dir / f"slice_{idx + 1:02d}.jsonl"
-        frozen_path.write_text("\n".join(json.dumps(row) for row in rows[start:end]) + "\n")
-        prompt_ids = [str(row.get("id", "")).strip() for row in rows[start:end]]
+        frozen_path.write_text("\n".join(json.dumps(row) for row in chunk) + "\n")
+        prompt_ids = [str(row.get("id", "")).strip() for row in chunk]
         if any(not row_id for row_id in prompt_ids):
             raise RuntimeError(f"Prompt slice {idx + 1} has empty row ids: {source_path}")
         if len(set(prompt_ids)) != len(prompt_ids):
@@ -97,11 +98,12 @@ def freeze_prompt_slices(
                 source_path=str(source_path),
                 frozen_path=str(frozen_path),
                 sha256=_sha256_file(frozen_path),
-                rows=slice_size,
-                prompt_limit=slice_size,
+                rows=current_size,
+                prompt_limit=current_size,
                 prompt_ids=prompt_ids,
             )
         )
+        start = end
     return slices
 
 
@@ -258,9 +260,9 @@ def promote_candidates(candidates: list[dict[str, Any]], *, top_k: int) -> list[
         for row in candidates
         if bool(row.get("teacher_margin_pass"))
         and bool(row.get("student_gain_pass"))
-        and bool(row.get("student_exact_gain_pass", True))
-        and bool(row.get("student_numeric_parse_pass", True))
-        and bool(row.get("eval_runtime_pass", True))
+        and bool(row.get("student_exact_gain_pass", False))
+        and bool(row.get("student_numeric_parse_pass", False))
+        and bool(row.get("eval_runtime_pass", False))
         and bool(row.get("integrity_pass"))
     ]
     ranked = sorted(

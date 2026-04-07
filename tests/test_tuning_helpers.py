@@ -142,28 +142,49 @@ def test_rank_and_promote_candidates():
                 "student_numeric_parse_rate": 0.99,
                 "eval_duration_seconds": 300.0,
             },
+            {
+                "candidate_id": "missing-gates",
+                "teacher_margin_pass": True,
+                "student_gain_pass": True,
+                "integrity_pass": True,
+                "student_minus_baseline": 0.10,
+                "student_minus_baseline_exact_match": 0.08,
+                "student_numeric_parse_rate": 0.99,
+                "eval_duration_seconds": 250.0,
+            },
         ],
         top_k=2,
     )
     assert [row["candidate_id"] for row in promoted] == ["y", "x"]
 
 
-def test_freeze_prompt_slice_writes_limited_rows(tmp_path: Path):
+def test_freeze_prompt_slice_ignores_limit_and_writes_all_rows(tmp_path: Path):
     source = Path("src/inference_projects/fixtures/real_eval_prompts_150.jsonl")
     out = tmp_path / "frozen_30.jsonl"
     frozen = freeze_prompt_slice(source_path=source, frozen_path=out, prompt_limit=30)
     assert out.exists()
-    assert frozen.rows == 30
-    assert len(frozen.prompt_ids) == 30
+    assert frozen.rows == 150
+    assert len(frozen.prompt_ids) == 150
     assert frozen.prompt_ids[0] == "p001"
-    assert frozen.prompt_ids[-1] == "p030"
+    assert frozen.prompt_ids[-1] == "p150"
 
 
-def test_freeze_prompt_slices_writes_disjoint_chunks(tmp_path: Path):
+def test_freeze_prompt_slices_balances_all_rows(tmp_path: Path):
     source = Path("src/inference_projects/fixtures/real_eval_prompts_150.jsonl")
     output_dir = tmp_path / "slices"
     slices = freeze_prompt_slices(source_path=source, output_dir=output_dir, slice_size=30, num_slices=3)
     assert len(slices) == 3
+    assert sum(slice_info.rows for slice_info in slices) == 150
+    assert max(slice_info.rows for slice_info in slices) - min(slice_info.rows for slice_info in slices) <= 1
     assert slices[0].prompt_ids[0] == "p001"
-    assert slices[1].prompt_ids[0] == "p031"
-    assert slices[2].prompt_ids[0] == "p061"
+    assert slices[1].prompt_ids[0] == "p051"
+    assert slices[2].prompt_ids[0] == "p101"
+
+
+def test_freeze_prompt_slices_uses_fewer_slices_for_small_datasets(tmp_path: Path):
+    source = tmp_path / "tiny.jsonl"
+    source.write_text('{"id":"a","prompt":"p1"}\n{"id":"b","prompt":"p2"}\n')
+    output_dir = tmp_path / "tiny_slices"
+    slices = freeze_prompt_slices(source_path=source, output_dir=output_dir, slice_size=0, num_slices=3)
+    assert len(slices) == 2
+    assert [slice_info.rows for slice_info in slices] == [1, 1]
