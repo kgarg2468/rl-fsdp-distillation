@@ -18,7 +18,7 @@ def test_bootstrap_mean_ci_is_deterministic():
     assert first[0] <= first[1]
 
 
-def test_freeze_prompt_file_validates_limit_and_uniqueness(tmp_path: Path):
+def test_freeze_prompt_file_uses_all_rows_and_validates_uniqueness(tmp_path: Path):
     source = tmp_path / "prompts.jsonl"
     source.write_text(
         "\n".join(
@@ -34,8 +34,8 @@ def test_freeze_prompt_file_validates_limit_and_uniqueness(tmp_path: Path):
     info = freeze_prompt_file(source_path=source, frozen_path=frozen, prompt_limit=2)
     assert frozen.exists()
     assert info.total_rows == 3
-    assert info.prompt_limit == 2
-    assert info.prompt_ids == ["a", "b"]
+    assert info.prompt_limit == 3
+    assert info.prompt_ids == ["a", "b", "c"]
 
 
 def test_summarize_across_runs_computes_std():
