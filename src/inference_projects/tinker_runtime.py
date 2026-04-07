@@ -728,7 +728,7 @@ def _save_training_checkpoints(
 def run_real_rl(*, cfg: ProjectConfig) -> dict[str, object]:
     service = build_service_client()
     retry_config = _runtime_retry_config(cfg)
-    prompts = load_canary_prompts(limit=cfg.evaluation.prompt_limit, fixture_path=cfg.evaluation.prompt_file)
+    prompts = load_canary_prompts(fixture_path=cfg.evaluation.prompt_file)
     training_examples = [(row.prompt, row.reference or row.prompt) for row in prompts]
     train_client = service.create_lora_training_client(
         base_model=cfg.teacher_model,
@@ -827,7 +827,7 @@ def run_real_teacher_ft(*, cfg: ProjectConfig, teacher_payload: dict[str, object
 
     service = build_service_client()
     retry_config = _runtime_retry_config(cfg)
-    prompts = load_canary_prompts(limit=cfg.evaluation.prompt_limit, fixture_path=cfg.evaluation.prompt_file)
+    prompts = load_canary_prompts(fixture_path=cfg.evaluation.prompt_file)
     training_examples = [(row.prompt, row.reference or row.prompt) for row in prompts]
     train_client = service.create_training_client_from_state_with_optimizer(
         prior_checkpoint,
@@ -934,10 +934,7 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
     service = build_service_client()
     retry_config = _runtime_retry_config(cfg)
     training_prompt_file = cfg.distillation.training_prompt_file or cfg.evaluation.prompt_file
-    prompts = load_canary_prompts(
-        limit=cfg.distillation.training_prompt_limit,
-        fixture_path=training_prompt_file,
-    )
+    prompts = load_canary_prompts(fixture_path=training_prompt_file)
     prompt_texts = [row.prompt for row in prompts]
     teacher_prompt_texts = [
         _apply_prompt_template(row.prompt, cfg.distillation.teacher_prompt_template) for row in prompts
@@ -1100,7 +1097,7 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
             "context_length": str(cfg.distillation.context_length),
             "grad_clip": str(cfg.distillation.grad_clip),
             "weight_decay": str(cfg.distillation.weight_decay),
-            "training_prompt_limit": str(cfg.distillation.training_prompt_limit),
+            "training_prompt_limit": str(len(prompts)),
         },
     )
     train_info = student_train_client.get_info()
@@ -1166,7 +1163,7 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
             "distill_stability_score": distill_stability_score,
             "distill_nan_events": distill_nan_events,
             "distillation_config": {
-                "training_prompt_limit": cfg.distillation.training_prompt_limit,
+                "training_prompt_limit": len(prompts),
                 "training_prompt_file": str(training_prompt_file),
                 "teacher_prompt_template": cfg.distillation.teacher_prompt_template,
                 "filter_profile": cfg.distillation.filter_profile,
@@ -1261,7 +1258,7 @@ def run_real_eval(
 ) -> dict[str, object]:
     service = build_service_client()
     retry_config = _runtime_retry_config(cfg)
-    prompts = load_canary_prompts(limit=cfg.evaluation.prompt_limit, fixture_path=cfg.evaluation.prompt_file)
+    prompts = load_canary_prompts(fixture_path=cfg.evaluation.prompt_file)
     prompt_texts = [row.prompt for row in prompts]
     teacher_prompt_texts = [
         _apply_prompt_template(row.prompt, cfg.distillation.teacher_prompt_template) for row in prompts
