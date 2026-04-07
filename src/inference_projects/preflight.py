@@ -42,12 +42,6 @@ def run_preflight(
 
     projected_total = budget.projected_total_cost_usd(cfg)
 
-    if projected_total < cfg.runtime.projection_warning_min_usd or projected_total > cfg.runtime.projection_warning_max_usd:
-        warnings.append(
-            "Projected total spend is outside target warning band "
-            f"${cfg.runtime.projection_warning_min_usd:.2f}-${cfg.runtime.projection_warning_max_usd:.2f}."
-        )
-
     if check_state_dir:
         _check_state_dir_permissions(Path(state_dir), errors)
 
