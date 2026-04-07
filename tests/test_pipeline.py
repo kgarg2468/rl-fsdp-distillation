@@ -44,6 +44,69 @@ def test_projection_warning_band_does_not_block_run(tmp_path: Path):
     assert (state_dir / "artifacts/checkpoints/teacher/best_checkpoint.json").exists()
 
 
+def test_stage_budget_cap_exceeded_blocks_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    state_dir = tmp_path / "state"
+    cfg_path = tmp_path / "tight_caps.toml"
+    text = Path("config/default.toml").read_text()
+    text = text.replace("rl_prefill = 3000000", "rl_prefill = 10")
+    text = text.replace("rl_sample = 12000000", "rl_sample = 10")
+    cfg_path.write_text(text)
+    monkeypatch.setenv("TINKER_API_KEY", "dummy-key")
+    monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
+
+    class FakeRealRL:
+        mode = "real"
+
+        def run(self, *, cfg, actual_cost_usd):
+            _ = (cfg, actual_cost_usd)
+            return {
+                "model": "meta-llama/Llama-3.1-8B",
+                "stage": "rl",
+                "quality_score": 0.75,
+                "stability_score": 0.92,
+                REAL_USAGE_KEY: {
+                    "prefill_tokens": 321,
+                    "sample_tokens": 123,
+                    "train_tokens": 0,
+                    "cost_usd": 0.0456,
+                    "provider_raw": {"mocked": True},
+                    "run_id": "run-abc",
+                },
+            }
+
+    class NoopTeacherFT:
+        mode = "real"
+
+        def run(self, *, cfg, teacher_payload, actual_cost_usd):
+            raise AssertionError("unexpected call")
+
+    class NoopDistill:
+        mode = "real"
+
+        def run(self, *, cfg, teacher_payload, actual_cost_usd):
+            raise AssertionError("unexpected call")
+
+    class NoopEval:
+        mode = "real"
+
+        def run(self, *, cfg, teacher_payload, student_payload, actual_cost_usd):
+            raise AssertionError("unexpected call")
+
+    monkeypatch.setattr(
+        "inference_projects.pipeline.select_stage_adapters",
+        lambda mode: StageAdapters(
+            rl=FakeRealRL(),
+            teacher_ft=NoopTeacherFT(),
+            distill=NoopDistill(),
+            eval=NoopEval(),
+        ),
+    )
+    with pytest.raises(RuntimeError) as exc:
+        run_pipeline_command("rl", mode="real", state_dir=state_dir, config_path=cfg_path)
+    assert "budget cap" in str(exc.value).lower()
+    assert not (state_dir / "artifacts/checkpoints/teacher/best_checkpoint.json").exists()
+
+
 def test_real_mode_without_credentials_fails_fast(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     state_dir = tmp_path / "state"
     for key in ("TINKER_API_KEY", "TINKER_BASE_URL"):
