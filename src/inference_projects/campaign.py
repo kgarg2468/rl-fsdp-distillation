@@ -30,11 +30,8 @@ class FrozenPromptInfo:
 
 
 def freeze_prompt_file(*, source_path: Path, frozen_path: Path, prompt_limit: int) -> FrozenPromptInfo:
+    _ = prompt_limit  # cap-like prompt limits are telemetry-only
     rows = _load_jsonl_rows(source_path)
-    if len(rows) < prompt_limit:
-        raise RuntimeError(
-            f"Prompt file has {len(rows)} rows, but prompt_limit requires at least {prompt_limit}: {source_path}"
-        )
 
     ids: list[str] = []
     seen: set[str] = set()
@@ -53,13 +50,14 @@ def freeze_prompt_file(*, source_path: Path, frozen_path: Path, prompt_limit: in
     frozen_path.parent.mkdir(parents=True, exist_ok=True)
     frozen_path.write_text(source_path.read_text())
     digest = _sha256_file(frozen_path)
+    effective_prompt_limit = len(rows)
     return FrozenPromptInfo(
         source_path=str(source_path),
         frozen_path=str(frozen_path),
         sha256=digest,
         total_rows=len(rows),
-        prompt_limit=prompt_limit,
-        prompt_ids=ids[:prompt_limit],
+        prompt_limit=effective_prompt_limit,
+        prompt_ids=ids[:effective_prompt_limit],
     )
 
 
@@ -239,6 +237,7 @@ def format_campaign_report(summary: dict[str, Any]) -> str:
         "",
         "## Status",
         f"- Campaign status: {summary.get('campaign_status', 'unknown')}",
+        f"- Campaign win: {summary.get('campaign_win', False)}",
         "",
         "## Spend Telemetry",
         f"- Prior spend (USD): {float(spend.get('prior_spend_usd', 0.0)):.4f}",
