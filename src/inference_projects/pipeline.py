@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field, replace
+import hashlib
 import json
 from pathlib import Path
 import threading
@@ -111,6 +112,12 @@ class StageExecutionContext:
 
 
 class StageExecutionError(RuntimeError):
+    def __init__(self, message: str, *, failure_class: str):
+        super().__init__(message)
+        self.failure_class = failure_class
+
+
+class GuardrailViolationError(RuntimeError):
     def __init__(self, message: str, *, failure_class: str):
         super().__init__(message)
         self.failure_class = failure_class
@@ -262,13 +269,218 @@ def _classify_exception(exc: Exception) -> str:
         return "stalled"
     if isinstance(exc, FileNotFoundError):
         return "invariant_failed"
+    if isinstance(exc, GuardrailViolationError):
+        return exc.failure_class
     if isinstance(exc, StageExecutionError):
         return exc.failure_class
+    if "budget cap" in message or "token cap" in message:
+        return "budget_cap_exceeded"
+    if "run cap" in message:
+        return "run_cap_reached"
+    if "reproducibility" in message:
+        return "reproducibility_failed"
     if "integrity" in message:
         return "integrity_failed"
     if "retry" in message or "timeout" in message or "connection" in message:
         return "transient_exhausted"
     return "failed"
+
+
+def _stable_json_dumps(payload: Any) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(8192)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _config_fingerprint(cfg: ProjectConfig) -> str:
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "name": cfg.name,
+        "seed": cfg.seed,
+        "models": {
+            "teacher": cfg.teacher_model,
+            "student": cfg.student_model,
+            "baseline": cfg.baseline_model,
+        },
+        "token_rates_per_million": dict(sorted(cfg.token_rates_per_million.items())),
+        "token_caps": {stage: cfg.token_caps[stage].as_dict() for stage in REQUIRED_STAGES},
+        "runtime": {
+            "default_mode": cfg.runtime.default_mode,
+            "projection_warning_min_usd": cfg.runtime.projection_warning_min_usd,
+            "projection_warning_max_usd": cfg.runtime.projection_warning_max_usd,
+            "real_required_env": list(cfg.runtime.real_required_env),
+            "real_poll_interval_seconds": cfg.runtime.real_poll_interval_seconds,
+            "real_poll_timeout_seconds": cfg.runtime.real_poll_timeout_seconds,
+            "retry_max_connections": cfg.runtime.retry_max_connections,
+            "retry_progress_timeout_seconds": cfg.runtime.retry_progress_timeout_seconds,
+            "retry_delay_base_seconds": cfg.runtime.retry_delay_base_seconds,
+            "retry_delay_max_seconds": cfg.runtime.retry_delay_max_seconds,
+            "retry_jitter_factor": cfg.runtime.retry_jitter_factor,
+            "retry_enabled": cfg.runtime.retry_enabled,
+            "max_consecutive_failures": cfg.runtime.max_consecutive_failures,
+        },
+        "evaluation": {
+            "prompt_file": str(cfg.evaluation.prompt_file),
+            "prompt_limit": cfg.evaluation.prompt_limit,
+            "max_concurrency": cfg.evaluation.max_concurrency,
+            "batch_size": cfg.evaluation.batch_size,
+            "max_tokens_eval": cfg.evaluation.max_tokens_eval,
+            "eval_temperature": cfg.evaluation.eval_temperature,
+            "eval_stop_tokens": list(cfg.evaluation.eval_stop_tokens),
+            "eval_max_tokens_candidates": list(cfg.evaluation.eval_max_tokens_candidates),
+            "teacher_integrity_refusal_threshold": cfg.evaluation.teacher_integrity_refusal_threshold,
+            "teacher_integrity_min_score": cfg.evaluation.teacher_integrity_min_score,
+            "teacher_integrity_numeric_parse_threshold": cfg.evaluation.teacher_integrity_numeric_parse_threshold,
+        },
+        "distillation": {
+            "training_prompt_limit": cfg.distillation.training_prompt_limit,
+            "training_prompt_file": (
+                str(cfg.distillation.training_prompt_file) if cfg.distillation.training_prompt_file is not None else None
+            ),
+            "teacher_prompt_template": cfg.distillation.teacher_prompt_template,
+            "filter_profile": cfg.distillation.filter_profile,
+            "hard_example_ratio": cfg.distillation.hard_example_ratio,
+            "kd_alpha": cfg.distillation.kd_alpha,
+            "kd_temperature": cfg.distillation.kd_temperature,
+            "learning_rate": cfg.distillation.learning_rate,
+            "epochs": cfg.distillation.epochs,
+            "batch_size": cfg.distillation.batch_size,
+            "warmup_ratio": cfg.distillation.warmup_ratio,
+            "lora_rank": cfg.distillation.lora_rank,
+            "context_length": cfg.distillation.context_length,
+            "grad_clip": cfg.distillation.grad_clip,
+            "weight_decay": cfg.distillation.weight_decay,
+        },
+        "campaign": {
+            "seeds": list(cfg.campaign.seeds),
+            "min_runs": cfg.campaign.min_runs,
+            "max_runs": cfg.campaign.max_runs,
+            "bootstrap_reps": cfg.campaign.bootstrap_reps,
+            "early_stop_threshold": cfg.campaign.early_stop_threshold,
+            "strict_run_cap": cfg.campaign.strict_run_cap,
+        },
+        "tuning": {
+            "stage1_prompt_limit": cfg.tuning.stage1_prompt_limit,
+            "stage2_prompt_limit": cfg.tuning.stage2_prompt_limit,
+            "sweep_runs": cfg.tuning.sweep_runs,
+            "teacher_candidates": list(cfg.tuning.teacher_candidates),
+            "promotion_top_k": cfg.tuning.promotion_top_k,
+            "min_teacher_margin": cfg.tuning.min_teacher_margin,
+            "min_student_gain": cfg.tuning.min_student_gain,
+            "min_student_exact_gain": cfg.tuning.min_student_exact_gain,
+            "min_student_numeric_parse": cfg.tuning.min_student_numeric_parse,
+            "max_eval_duration_seconds": cfg.tuning.max_eval_duration_seconds,
+            "strict_run_cap": cfg.tuning.strict_run_cap,
+        },
+    }
+    return _sha256_text(_stable_json_dumps(payload))
+
+
+def _minimal_campaign_run_fingerprint(run: dict[str, Any]) -> dict[str, Any]:
+    metrics = run.get("metrics", {})
+    means = metrics.get("means", {}) if isinstance(metrics, dict) else {}
+    return {
+        "seed": run.get("seed"),
+        "stages_completed": list(run.get("stages_completed", [])),
+        "integrity": {
+            "status": run.get("integrity", {}).get("status"),
+            "passed": run.get("integrity", {}).get("passed"),
+        },
+        "acceptance_checks": dict(run.get("acceptance_checks", {})),
+        "means": dict(means) if isinstance(means, dict) else {},
+        "eval_rows_sha256": run.get("eval_rows_sha256", ""),
+    }
+
+
+def _minimal_tune_candidate_fingerprint(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "candidate_id": row.get("candidate_id", ""),
+        "phase": row.get("phase", ""),
+        "teacher_model": row.get("teacher_model", ""),
+        "teacher_minus_baseline": row.get("teacher_minus_baseline", -999.0),
+        "student_minus_baseline": row.get("student_minus_baseline", -999.0),
+        "student_minus_baseline_exact_match": row.get("student_minus_baseline_exact_match", -999.0),
+        "student_numeric_parse_rate": row.get("student_numeric_parse_rate", -999.0),
+        "teacher_margin_pass": bool(row.get("teacher_margin_pass", False)),
+        "student_gain_pass": bool(row.get("student_gain_pass", False)),
+        "student_exact_gain_pass": bool(row.get("student_exact_gain_pass", False)),
+        "student_numeric_parse_pass": bool(row.get("student_numeric_parse_pass", False)),
+        "eval_runtime_pass": bool(row.get("eval_runtime_pass", False)),
+        "integrity_pass": bool(row.get("integrity_pass", False)),
+        "composite_pass": bool(row.get("composite_pass", False)),
+    }
+
+
+def _campaign_run_invariant(run: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "seed": run.get("seed"),
+        "stages_completed": list(run.get("stages_completed", [])),
+        "has_metrics": bool("metrics" in run),
+        "eval_row_ids_sha256": str(run.get("eval_row_ids_sha256", "")),
+    }
+
+
+def _enforce_reproducibility(
+    *,
+    command: str,
+    mode: str,
+    summary_path: Path,
+    reproducibility_payload: dict[str, Any],
+) -> None:
+    if mode not in {"mock", "real"} or not summary_path.exists():
+        return
+    try:
+        prior = json.loads(summary_path.read_text())
+    except Exception:
+        return
+    if not isinstance(prior, dict):
+        return
+    if str(prior.get("campaign_status", "")) == "failed" or str(prior.get("status", "")) == "failed":
+        return
+    prior_repro = prior.get("reproducibility")
+    if not isinstance(prior_repro, dict):
+        return
+    if str(prior_repro.get("mode", "")) != mode:
+        return
+    if str(prior_repro.get("input_fingerprint", "")) != str(reproducibility_payload.get("input_fingerprint", "")):
+        return
+    if mode == "mock":
+        prior_artifact_fingerprint = str(prior_repro.get("artifact_fingerprint", ""))
+        artifact_fingerprint = str(reproducibility_payload.get("artifact_fingerprint", ""))
+        if (
+            prior_artifact_fingerprint
+            and artifact_fingerprint
+            and prior_artifact_fingerprint != artifact_fingerprint
+        ):
+            raise GuardrailViolationError(
+                f"Mock reproducibility mismatch for command '{command}': repeated execution with identical inputs produced different outputs.",
+                failure_class="reproducibility_failed",
+            )
+        return
+
+    prior_invariant_fingerprint = str(prior_repro.get("invariant_fingerprint", ""))
+    invariant_fingerprint = str(reproducibility_payload.get("invariant_fingerprint", ""))
+    # Backwards compatibility for older summaries that predate real-mode reproducibility enforcement.
+    if not prior_invariant_fingerprint or not invariant_fingerprint:
+        return
+    if prior_invariant_fingerprint != invariant_fingerprint:
+        raise GuardrailViolationError(
+            f"Real-mode reproducibility mismatch for command '{command}': repeated execution with identical inputs violated procedure-level invariants.",
+            failure_class="reproducibility_failed",
+        )
 
 
 def _run_with_watchdog(
@@ -397,7 +609,12 @@ def run_campaign(
     last_completed_stage = ""
     recoverable = False
     frozen_info_payload: dict[str, Any] = {}
-    planned_seeds = list(cfg.campaign.seeds)[: cfg.campaign.max_runs]
+    config_fingerprint = _config_fingerprint(cfg)
+    strict_run_cap = int(cfg.campaign.strict_run_cap)
+    strict_run_cap_enforced = strict_run_cap > 0
+    effective_max_runs = min(cfg.campaign.max_runs, strict_run_cap) if strict_run_cap_enforced else cfg.campaign.max_runs
+    planned_seeds = list(cfg.campaign.seeds)[:effective_max_runs]
+    strict_run_cap_hit = strict_run_cap_enforced and cfg.campaign.max_runs > effective_max_runs
     summary_path = campaign_dir / "campaign_summary.json"
     report_path = campaign_dir / "campaign_report.md"
     _emit_log(
@@ -409,6 +626,9 @@ def run_campaign(
         resume=options.resume,
         heartbeat_seconds=options.heartbeat_seconds,
         progress_timeout_seconds=options.progress_timeout_seconds,
+        strict_run_cap_configured=strict_run_cap,
+        strict_run_cap_effective=effective_max_runs,
+        strict_run_cap_enforced=strict_run_cap_enforced,
     )
 
     try:
@@ -418,13 +638,6 @@ def run_campaign(
             prompt_limit=cfg.evaluation.prompt_limit,
         )
         frozen_info_payload = frozen_info.as_dict()
-        capped_seeds = planned_seeds[: cfg.campaign.strict_run_cap]
-        if len(capped_seeds) < len(planned_seeds):
-            stop_reason = (
-                f"Campaign strict run cap reached: planned={len(planned_seeds)} cap={cfg.campaign.strict_run_cap}."
-            )
-            campaign_status = "needs_debug"
-        planned_seeds = capped_seeds
 
         for run_index, seed in enumerate(planned_seeds, start=1):
             run_id = f"seed-{seed}"
@@ -561,6 +774,10 @@ def run_campaign(
                 if not eval_rows:
                     raise RuntimeError(f"Campaign seed {seed} did not emit eval rows: {run_paths.eval_rows}")
                 run_rows.append(eval_rows)
+                run_summary["eval_rows_sha256"] = _sha256_file(run_paths.eval_rows)
+                run_summary["eval_row_ids_sha256"] = _sha256_text(
+                    _stable_json_dumps([str(row.get("row_id", "")) for row in eval_rows])
+                )
                 run_summary["metrics"] = campaign_utils.summarize_eval_rows(
                     eval_rows=eval_rows,
                     bootstrap_reps=run_cfg.campaign.bootstrap_reps,
@@ -664,10 +881,95 @@ def run_campaign(
         across_runs = {"runs": 0, "mean": {}, "std": {}}
         pooled = {"rows": 0, "means": {}, "ci95": {}}
 
+    runs_with_acceptance = [run for run in run_summaries if isinstance(run.get("acceptance_checks"), dict)]
+    runs_with_integrity = [run for run in run_summaries if isinstance(run.get("integrity"), dict)]
+    teacher_margin_all_runs = bool(runs_with_acceptance) and all(
+        bool(run.get("acceptance_checks", {}).get("teacher_vs_baseline_margin_min_0_05"))
+        for run in runs_with_acceptance
+    )
+    eval_runtime_all_runs = bool(runs_with_acceptance) and all(
+        bool(run.get("acceptance_checks", {}).get("eval_duration_under_720_seconds"))
+        for run in runs_with_acceptance
+    )
+    integrity_all_runs = bool(runs_with_integrity) and all(
+        bool(run.get("integrity", {}).get("passed", False))
+        for run in runs_with_integrity
+    )
+    quality_checks = {
+        "teacher_vs_baseline_margin_min_0_05_all_runs": teacher_margin_all_runs,
+        "eval_duration_under_720_seconds_all_runs": eval_runtime_all_runs,
+        "integrity_passed_all_runs": integrity_all_runs,
+    }
+    campaign_win = teacher_margin_all_runs and eval_runtime_all_runs and integrity_all_runs
+    if campaign_status == "ok" and not campaign_win:
+        campaign_status = "needs_debug"
+        if not stop_reason:
+            stop_reason = "Campaign completed but did not meet all win thresholds."
+
+    reproducibility_input = {
+        "schema_version": SCHEMA_VERSION,
+        "mode": mode,
+        "config_fingerprint": config_fingerprint,
+        "frozen_prompts_sha256": str(frozen_info_payload.get("sha256", "")),
+        "planned_seeds": list(planned_seeds),
+        "acceptance_thresholds": {
+            "teacher_vs_baseline_margin_min": 0.05,
+            "eval_duration_max_seconds_exclusive": 720.0,
+            "integrity_required": True,
+        },
+        "run_cap": {
+            "configured": strict_run_cap,
+            "enforced": strict_run_cap_enforced,
+            "effective_max_runs": effective_max_runs,
+            "planned_max_runs": cfg.campaign.max_runs,
+            "cap_hit": strict_run_cap_hit,
+        },
+    }
+    reproducibility_artifact = {
+        "campaign_status": campaign_status,
+        "campaign_win": campaign_win,
+        "executed_seeds": [run["seed"] for run in run_summaries],
+        "quality_checks": quality_checks,
+        "runs": [_minimal_campaign_run_fingerprint(run) for run in run_summaries],
+    }
+    reproducibility_invariant = {
+        "config_fingerprint": config_fingerprint,
+        "frozen_prompts_sha256": str(frozen_info_payload.get("sha256", "")),
+        "run_cap": reproducibility_input["run_cap"],
+        "planned_seeds": list(planned_seeds),
+        "executed_seeds": [run["seed"] for run in run_summaries],
+        "runs": [_campaign_run_invariant(run) for run in run_summaries],
+    }
+    reproducibility = {
+        "mode": mode,
+        "contract": (
+            "deterministic_artifact_fingerprint"
+            if mode == "mock"
+            else "procedure_level_inputs_and_audit_invariants"
+        ),
+        "invariant_contract_version": "v1",
+        "config_fingerprint": config_fingerprint,
+        "input_fingerprint": _sha256_text(_stable_json_dumps(reproducibility_input)),
+        "artifact_fingerprint": _sha256_text(_stable_json_dumps(reproducibility_artifact)),
+        "invariant_fingerprint": _sha256_text(_stable_json_dumps(reproducibility_invariant)),
+        "input": reproducibility_input,
+        "invariant_payload": reproducibility_invariant,
+    }
+
+    report_path = campaign_dir / "campaign_report.md"
+    summary_path = campaign_dir / "campaign_summary.json"
+    _enforce_reproducibility(
+        command="campaign",
+        mode=mode,
+        summary_path=summary_path,
+        reproducibility_payload=reproducibility,
+    )
+
     summary: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "mode": mode,
         "campaign_status": campaign_status,
+        "campaign_win": campaign_win,
         "planned_seeds": planned_seeds,
         "executed_seeds": [run["seed"] for run in run_summaries],
         "frozen_prompts": frozen_info_payload,
@@ -677,6 +979,13 @@ def run_campaign(
             "pooled": pooled,
         },
         "early_stop": early_stop,
+        "acceptance_checks": quality_checks,
+        "guardrails": {
+            "budget_caps_enforced": True,
+            "projection_warning_band_enforced": False,
+            "campaign_strict_run_cap": reproducibility_input["run_cap"],
+        },
+        "reproducibility": reproducibility,
         "spend": {
             "new_spend_usd": round(new_spend_usd, 4),
             "total_spend_usd": round(new_spend_usd, 4),
@@ -686,27 +995,6 @@ def run_campaign(
         "last_completed_stage": last_completed_stage,
         "recoverable": recoverable,
     }
-    quality_checks = {
-        "teacher_vs_baseline_margin_min_0_05_all_runs": all(
-            bool(run.get("acceptance_checks", {}).get("teacher_vs_baseline_margin_min_0_05"))
-            for run in run_summaries
-            if "acceptance_checks" in run
-        ),
-        "eval_duration_under_720_seconds_all_runs": all(
-            bool(run.get("acceptance_checks", {}).get("eval_duration_under_720_seconds"))
-            for run in run_summaries
-            if "acceptance_checks" in run
-        ),
-        "integrity_passed_all_runs": all(
-            bool(run.get("integrity", {}).get("passed", False))
-            for run in run_summaries
-            if "integrity" in run
-        ),
-    }
-    summary["acceptance_checks"] = quality_checks
-
-    report_path = campaign_dir / "campaign_report.md"
-    summary_path = campaign_dir / "campaign_summary.json"
     summary["artifacts"] = {"campaign_summary": str(summary_path), "campaign_report": str(report_path)}
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, indent=2) + "\n")
@@ -763,6 +1051,14 @@ def run_tune(
     final_campaign_summary: dict[str, Any] | None = None
     final_campaign_info: dict[str, object] = {"executed": False}
     sweep_invocations = 0
+    config_fingerprint = _config_fingerprint(cfg)
+    strict_run_cap = int(cfg.tuning.strict_run_cap)
+    strict_run_cap_enforced = strict_run_cap > 0
+    phase_cap_counts: dict[str, dict[str, Any]] = {
+        "teacher_headroom": {"configured": strict_run_cap, "planned": 0, "executed": 0, "cap_hit": False},
+        "distill_tuning": {"configured": strict_run_cap, "planned": 0, "executed": 0, "cap_hit": False},
+        "confirm": {"configured": strict_run_cap, "planned": 0, "executed": 0, "cap_hit": False},
+    }
 
     _emit_log(
         "command_start",
@@ -773,6 +1069,8 @@ def run_tune(
         resume=options.resume,
         heartbeat_seconds=options.heartbeat_seconds,
         progress_timeout_seconds=options.progress_timeout_seconds,
+        strict_run_cap_configured=strict_run_cap,
+        strict_run_cap_enforced=strict_run_cap_enforced,
     )
 
     def _mean(values: list[float]) -> float:
@@ -869,26 +1167,19 @@ def run_tune(
             "artifacts": {"runs": [dict(row.get("artifacts", {})) for row in run_rows]},
         }
 
-    def _assert_sweep_capacity() -> None:
-        if sweep_invocations >= cfg.tuning.strict_run_cap:
-            raise StageExecutionError(
-                f"Tuning strict run cap reached: executed={sweep_invocations} cap={cfg.tuning.strict_run_cap}",
-                failure_class="invariant_failed",
-            )
-
     teacher_winner: dict[str, Any] | None = None
     winner_row: dict[str, Any] | None = None
     try:
         stage2_frozen = tuning_utils.freeze_prompt_slice(
             source_path=cfg.evaluation.prompt_file,
             frozen_path=tuning_dir / "frozen_prompts_stage2.jsonl",
-            prompt_limit=cfg.tuning.stage2_prompt_limit,
+            prompt_limit=0,
         )
         stage1_slices = tuning_utils.freeze_prompt_slices(
             source_path=Path(stage2_frozen.frozen_path),
             output_dir=tuning_dir / "frozen_stage1_slices",
-            slice_size=cfg.tuning.stage1_prompt_limit,
-            num_slices=3,
+            slice_size=0,
+            num_slices=min(3, stage2_frozen.rows),
         )
         teacher_specs = tuning_utils.teacher_headroom_candidates(
             current_teacher=cfg.teacher_model,
@@ -897,8 +1188,14 @@ def run_tune(
             teacher_candidates=cfg.tuning.teacher_candidates,
             sweep_runs=cfg.tuning.sweep_runs,
         )
+        phase_cap_counts["teacher_headroom"]["planned"] = len(teacher_specs)
+        if strict_run_cap_enforced and len(teacher_specs) > strict_run_cap:
+            teacher_specs = teacher_specs[:strict_run_cap]
+        phase_cap_counts["teacher_headroom"]["executed"] = len(teacher_specs)
+        phase_cap_counts["teacher_headroom"]["cap_hit"] = bool(
+            strict_run_cap_enforced and phase_cap_counts["teacher_headroom"]["planned"] > len(teacher_specs)
+        )
         for spec in teacher_specs:
-            _assert_sweep_capacity()
             sweep_invocations += 1
             candidate_id = str(spec["candidate_id"])
             _emit_log("run_start", command="tune", run=candidate_id, phase="teacher_headroom", sweep_index=sweep_invocations)
@@ -914,7 +1211,7 @@ def run_tune(
                             run_dir=run_dir,
                             seed=seed,
                             prompt_file=Path(slice_info.frozen_path),
-                            prompt_limit=cfg.tuning.stage1_prompt_limit,
+                            prompt_limit=int(slice_info.rows),
                             teacher_model=str(spec["teacher_model"]),
                             max_tokens_eval=int(spec["max_tokens_eval"]),
                             eval_temperature=float(spec["eval_temperature"]),
@@ -986,8 +1283,14 @@ def run_tune(
             distill_specs = tuning_utils.distill_l8_candidates()
             if cfg.tuning.sweep_runs > 0:
                 distill_specs = distill_specs[: cfg.tuning.sweep_runs]
+            phase_cap_counts["distill_tuning"]["planned"] = len(distill_specs)
+            if strict_run_cap_enforced and len(distill_specs) > strict_run_cap:
+                distill_specs = distill_specs[:strict_run_cap]
+            phase_cap_counts["distill_tuning"]["executed"] = len(distill_specs)
+            phase_cap_counts["distill_tuning"]["cap_hit"] = bool(
+                strict_run_cap_enforced and phase_cap_counts["distill_tuning"]["planned"] > len(distill_specs)
+            )
             for spec in distill_specs:
-                _assert_sweep_capacity()
                 sweep_invocations += 1
                 candidate_id = str(spec["candidate_id"])
                 _emit_log("run_start", command="tune", run=candidate_id, phase="distill_tuning", sweep_index=sweep_invocations)
@@ -1001,7 +1304,7 @@ def run_tune(
                             run_dir=run_dir,
                             seed=seed,
                             prompt_file=Path(slice_info.frozen_path),
-                            prompt_limit=cfg.tuning.stage1_prompt_limit,
+                            prompt_limit=int(slice_info.rows),
                             teacher_model=str(teacher_winner["teacher_model"]),
                             max_tokens_eval=int(teacher_winner["max_tokens_eval"]),
                             eval_temperature=float(teacher_winner["eval_temperature"]),
@@ -1052,7 +1355,15 @@ def run_tune(
                 stop_reason = "No distill candidates met strict promotion gates."
 
         if status == "ok" and stage2_frozen is not None:
-            for promoted in promoted_rows:
+            confirm_specs = promoted_rows
+            phase_cap_counts["confirm"]["planned"] = len(confirm_specs)
+            if strict_run_cap_enforced and len(confirm_specs) > strict_run_cap:
+                confirm_specs = confirm_specs[:strict_run_cap]
+            phase_cap_counts["confirm"]["executed"] = len(confirm_specs)
+            phase_cap_counts["confirm"]["cap_hit"] = bool(
+                strict_run_cap_enforced and phase_cap_counts["confirm"]["planned"] > len(confirm_specs)
+            )
+            for promoted in confirm_specs:
                 candidate_id = str(promoted["candidate_id"])
                 _emit_log("run_start", command="tune", run=candidate_id, phase="confirm")
                 run_dir = tuning_dir / "confirm" / candidate_id
@@ -1062,7 +1373,7 @@ def run_tune(
                     run_dir=run_dir,
                     seed=cfg.campaign.seeds[0],
                     prompt_file=Path(stage2_frozen.frozen_path),
-                    prompt_limit=cfg.tuning.stage2_prompt_limit,
+                    prompt_limit=int(stage2_frozen.rows),
                     teacher_model=str(promoted["teacher_model"]),
                     max_tokens_eval=int(promoted["max_tokens_eval"]),
                     eval_temperature=float(promoted["eval_temperature"]),
@@ -1103,12 +1414,15 @@ def run_tune(
                 stop_reason = "No confirmation candidate passed strict gates on 150-prompt slice."
             else:
                 winner_row = ranked_confirmation[0]
+                if not bool(winner_row.get("composite_pass", False)):
+                    status = "needs_debug"
+                    stop_reason = "Top confirmation candidate failed composite acceptance checks."
 
         if status == "ok" and winner_row is not None and stage2_frozen is not None:
             final_eval = replace(
                 cfg.evaluation,
                 prompt_file=Path(stage2_frozen.frozen_path),
-                prompt_limit=cfg.tuning.stage2_prompt_limit,
+                prompt_limit=int(stage2_frozen.rows),
                 max_tokens_eval=int(winner_row["max_tokens_eval"]),
                 eval_temperature=float(winner_row["eval_temperature"]),
             )
@@ -1176,6 +1490,82 @@ def run_tune(
     if stage1_slices:
         frozen_payload["stage1_slices"] = [slice_info.as_dict() for slice_info in stage1_slices]
 
+    reproducibility_input = {
+        "schema_version": SCHEMA_VERSION,
+        "mode": mode,
+        "config_fingerprint": config_fingerprint,
+        "strict_run_cap": {
+            "configured": strict_run_cap,
+            "enforced": strict_run_cap_enforced,
+            "per_phase": phase_cap_counts,
+        },
+        "stage1_seeds": list(stage1_seeds),
+        "frozen_stage2_sha256": (
+            str(frozen_payload.get("stage2", {}).get("sha256", ""))
+            if isinstance(frozen_payload.get("stage2", {}), dict)
+            else ""
+        ),
+        "frozen_stage1_sha256": [
+            str(row.get("sha256", ""))
+            for row in frozen_payload.get("stage1_slices", [])
+            if isinstance(row, dict)
+        ],
+        "acceptance_thresholds": {
+            "min_teacher_margin": cfg.tuning.min_teacher_margin,
+            "min_student_gain": cfg.tuning.min_student_gain,
+            "min_student_exact_gain": cfg.tuning.min_student_exact_gain,
+            "min_student_numeric_parse": cfg.tuning.min_student_numeric_parse,
+            "max_eval_duration_seconds": cfg.tuning.max_eval_duration_seconds,
+        },
+    }
+    reproducibility_artifact = {
+        "status": status,
+        "winner_candidate_id": str(winner_row.get("candidate_id", "")) if isinstance(winner_row, dict) else "",
+        "acceptance_checks": acceptance_checks,
+        "teacher_rows": [_minimal_tune_candidate_fingerprint(row) for row in teacher_rows],
+        "distill_rows": [_minimal_tune_candidate_fingerprint(row) for row in distill_rows],
+        "confirmation_rows": [_minimal_tune_candidate_fingerprint(row) for row in confirmation_rows],
+        "final_campaign_status": str(final_campaign_info.get("campaign_status", "")),
+    }
+    reproducibility_invariant = {
+        "config_fingerprint": config_fingerprint,
+        "frozen_stage2_sha256": reproducibility_input["frozen_stage2_sha256"],
+        "frozen_stage1_sha256": list(reproducibility_input["frozen_stage1_sha256"]),
+        "strict_run_cap": reproducibility_input["strict_run_cap"],
+        "stage1_seeds": list(stage1_seeds),
+        "teacher_candidate_ids_executed": [str(row.get("candidate_id", "")) for row in teacher_rows],
+        "distill_candidate_ids_executed": [str(row.get("candidate_id", "")) for row in distill_rows],
+        "promoted_candidate_ids": [str(row.get("candidate_id", "")) for row in promoted_rows],
+        "confirmation_candidate_ids_executed": [str(row.get("candidate_id", "")) for row in confirmation_rows],
+        "phase_counts": {
+            "teacher_headroom": int(phase_cap_counts["teacher_headroom"]["executed"]),
+            "distill_tuning": int(phase_cap_counts["distill_tuning"]["executed"]),
+            "confirm": int(phase_cap_counts["confirm"]["executed"]),
+        },
+        "final_campaign_executed": bool(final_campaign_info.get("executed", False)),
+    }
+    reproducibility = {
+        "mode": mode,
+        "contract": (
+            "deterministic_artifact_fingerprint"
+            if mode == "mock"
+            else "procedure_level_inputs_and_audit_invariants"
+        ),
+        "invariant_contract_version": "v1",
+        "config_fingerprint": config_fingerprint,
+        "input_fingerprint": _sha256_text(_stable_json_dumps(reproducibility_input)),
+        "artifact_fingerprint": _sha256_text(_stable_json_dumps(reproducibility_artifact)),
+        "invariant_fingerprint": _sha256_text(_stable_json_dumps(reproducibility_invariant)),
+        "input": reproducibility_input,
+        "invariant_payload": reproducibility_invariant,
+    }
+    _enforce_reproducibility(
+        command="tune",
+        mode=mode,
+        summary_path=summary_path,
+        reproducibility_payload=reproducibility,
+    )
+
     summary: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "mode": mode,
@@ -1192,13 +1582,25 @@ def run_tune(
         "winner": winner_row,
         "final_campaign": final_campaign_info,
         "acceptance_checks": acceptance_checks,
+        "guardrails": {
+            "budget_caps_enforced": True,
+            "projection_warning_band_enforced": False,
+            "tuning_strict_run_cap": {
+                "configured": strict_run_cap,
+                "enforced": strict_run_cap_enforced,
+                "per_phase": phase_cap_counts,
+            },
+        },
+        "reproducibility": reproducibility,
         "execution_counts": {
             "candidates_total": len(candidate_rows),
             "teacher_candidates": len(teacher_rows),
             "distill_candidates": len(distill_rows),
             "confirmation_candidates": len(confirmation_rows),
             "sweep_invocations": sweep_invocations,
-            "strict_run_cap": cfg.tuning.strict_run_cap,
+            "strict_run_cap_configured": cfg.tuning.strict_run_cap,
+            "strict_run_cap_enforced": strict_run_cap_enforced,
+            "strict_run_cap_per_phase": phase_cap_counts,
         },
         "spend": {
             "sweep_spend_usd": round(sweep_spend_usd, 4),
@@ -1226,7 +1628,8 @@ def run_tune(
         command="tune",
         status=status,
         sweep_invocations=sweep_invocations,
-        strict_run_cap=cfg.tuning.strict_run_cap,
+        strict_run_cap_configured=cfg.tuning.strict_run_cap,
+        strict_run_cap_enforced=strict_run_cap_enforced,
         summary_path=str(summary_path),
         report_path=str(report_path),
     )
@@ -1491,6 +1894,35 @@ def _stage_budget_check(stage: str, cfg: ProjectConfig, paths: PipelinePaths) ->
     return ledger, projected_tokens, projected_cost
 
 
+def _enforce_stage_budget_caps(
+    *,
+    stage: str,
+    projected_tokens: TokenUsage,
+    projected_cost: float,
+    actual_tokens: TokenUsage,
+    actual_cost: float,
+) -> None:
+    token_violations: list[str] = []
+    if actual_tokens.prefill > projected_tokens.prefill:
+        token_violations.append(f"prefill={actual_tokens.prefill} > cap={projected_tokens.prefill}")
+    if actual_tokens.sample > projected_tokens.sample:
+        token_violations.append(f"sample={actual_tokens.sample} > cap={projected_tokens.sample}")
+    if actual_tokens.train > projected_tokens.train:
+        token_violations.append(f"train={actual_tokens.train} > cap={projected_tokens.train}")
+
+    cost_violation = actual_cost > (projected_cost + 1e-6)
+    if token_violations or cost_violation:
+        details: list[str] = []
+        if token_violations:
+            details.append("token caps violated (" + ", ".join(token_violations) + ")")
+        if cost_violation:
+            details.append(f"cost={round(actual_cost, 6)} > cap={round(projected_cost, 6)}")
+        raise GuardrailViolationError(
+            f"Stage '{stage}' exceeded configured budget cap: " + "; ".join(details),
+            failure_class="budget_cap_exceeded",
+        )
+
+
 def _real_usage_from_payload(payload: dict[str, object], cfg: ProjectConfig) -> tuple[TokenUsage, float, dict[str, object]]:
     raw = payload.get(REAL_USAGE_KEY)
     if not isinstance(raw, dict):
@@ -1665,6 +2097,13 @@ def run_rl(
     else:
         actual_tokens, actual_cost = mock_actual_tokens, mock_actual_cost
         usage = _mock_usage(stage, actual_tokens, actual_cost)
+    _enforce_stage_budget_caps(
+        stage=stage,
+        projected_tokens=projected_tokens,
+        projected_cost=projected_cost,
+        actual_tokens=actual_tokens,
+        actual_cost=actual_cost,
+    )
     _, updated_ledger = _record_stage(
         stage=stage,
         mode=mode,
@@ -1727,6 +2166,13 @@ def run_teacher_ft(
     else:
         actual_tokens, actual_cost = mock_actual_tokens, mock_actual_cost
         usage = _mock_usage(stage, actual_tokens, actual_cost)
+    _enforce_stage_budget_caps(
+        stage=stage,
+        projected_tokens=projected_tokens,
+        projected_cost=projected_cost,
+        actual_tokens=actual_tokens,
+        actual_cost=actual_cost,
+    )
     _, updated_ledger = _record_stage(
         stage=stage,
         mode=mode,
@@ -1789,6 +2235,13 @@ def run_distill(
     else:
         actual_tokens, actual_cost = mock_actual_tokens, mock_actual_cost
         usage = _mock_usage(stage, actual_tokens, actual_cost)
+    _enforce_stage_budget_caps(
+        stage=stage,
+        projected_tokens=projected_tokens,
+        projected_cost=projected_cost,
+        actual_tokens=actual_tokens,
+        actual_cost=actual_cost,
+    )
     _, updated_ledger = _record_stage(
         stage=stage,
         mode=mode,
@@ -1857,6 +2310,13 @@ def run_eval(
     else:
         actual_tokens, actual_cost = mock_actual_tokens, mock_actual_cost
         usage = _mock_usage(stage, actual_tokens, actual_cost)
+    _enforce_stage_budget_caps(
+        stage=stage,
+        projected_tokens=projected_tokens,
+        projected_cost=projected_cost,
+        actual_tokens=actual_tokens,
+        actual_cost=actual_cost,
+    )
     _, updated_ledger = _record_stage(
         stage=stage,
         mode=mode,
