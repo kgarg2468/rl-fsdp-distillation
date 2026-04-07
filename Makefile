@@ -2,8 +2,6 @@ PYTHON ?= python3
 MODE ?= mock
 CONFIG ?= config/default.toml
 STATE_DIR ?= .
-PRIOR_LEDGER ?=
-PROJECT_HARD_CAP_USD ?= 35.0
 RUNS_ROOT ?= $(CURDIR)/runs
 
 .PHONY: install test rl teacher_ft distill eval report all smoke preflight dryrun campaign run-dir all-run campaign-run verify
@@ -42,11 +40,7 @@ dryrun:
 	$(PYTHON) -m inference_projects.cli dryrun --mode $(MODE) --config $(CONFIG) --state-dir $(STATE_DIR)
 
 campaign:
-	@if [ -n "$(PRIOR_LEDGER)" ]; then \
-		$(PYTHON) -m inference_projects.cli campaign --mode $(MODE) --config $(CONFIG) --state-dir $(STATE_DIR) --prior-ledger $(PRIOR_LEDGER) --project-hard-cap-usd $(PROJECT_HARD_CAP_USD); \
-	else \
-		$(PYTHON) -m inference_projects.cli campaign --mode $(MODE) --config $(CONFIG) --state-dir $(STATE_DIR) --project-hard-cap-usd $(PROJECT_HARD_CAP_USD); \
-	fi
+	$(PYTHON) -m inference_projects.cli campaign --mode $(MODE) --config $(CONFIG) --state-dir $(STATE_DIR)
 
 run-dir:
 	@$(PYTHON) scripts/allocate_run_dir.py --root "$(RUNS_ROOT)"
@@ -59,20 +53,7 @@ all-run:
 campaign-run:
 	@STATE_DIR="$$($(PYTHON) scripts/allocate_run_dir.py --root "$(RUNS_ROOT)")"; \
 	echo "Allocated run directory: $$STATE_DIR"; \
-	PRIOR="$(PRIOR_LEDGER)"; \
-	if [ -z "$$PRIOR" ]; then \
-		PRIOR="$$($(PYTHON) scripts/allocate_run_dir.py --root "$(RUNS_ROOT)" --latest-ledger || true)"; \
-	fi; \
-	if [ "$(MODE)" = "real" ] && [ -z "$$PRIOR" ]; then \
-		echo "No prior ledger found under $(RUNS_ROOT). Set PRIOR_LEDGER=... for real campaign runs."; \
-		exit 2; \
-	fi; \
-	if [ -n "$$PRIOR" ]; then \
-		echo "Using prior ledger: $$PRIOR"; \
-		$(PYTHON) -m inference_projects.cli campaign --mode $(MODE) --config $(CONFIG) --state-dir "$$STATE_DIR" --prior-ledger "$$PRIOR" --project-hard-cap-usd $(PROJECT_HARD_CAP_USD); \
-	else \
-		$(PYTHON) -m inference_projects.cli campaign --mode $(MODE) --config $(CONFIG) --state-dir "$$STATE_DIR" --project-hard-cap-usd $(PROJECT_HARD_CAP_USD); \
-	fi
+	$(PYTHON) -m inference_projects.cli campaign --mode $(MODE) --config $(CONFIG) --state-dir "$$STATE_DIR"
 
 verify:
 	./scripts/verify_local.sh
