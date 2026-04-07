@@ -88,3 +88,34 @@ def test_distillation_training_prompt_file_must_exist(tmp_path: Path):
     cfg_path.write_text(text)
     with pytest.raises(FileNotFoundError):
         load_config(cfg_path)
+
+
+def test_cap_like_fields_allow_zero_and_warning_band_order_is_not_enforced(tmp_path: Path):
+    cfg_path = tmp_path / "uncapped.toml"
+    text = Path("config/default.toml").read_text()
+    text = text.replace("projection_warning_min_usd = 20.0", "projection_warning_min_usd = 40.0")
+    text = text.replace("projection_warning_max_usd = 30.0", "projection_warning_max_usd = 10.0")
+    text = text.replace("prompt_limit = 150", "prompt_limit = 0", 1)
+    text = text.replace("training_prompt_limit = 150", "training_prompt_limit = 0", 1)
+    text = text.replace("strict_run_cap = 16", "strict_run_cap = 0", 1)
+    text = text.replace("stage1_prompt_limit = 30", "stage1_prompt_limit = 0", 1)
+    text = text.replace("stage2_prompt_limit = 150", "stage2_prompt_limit = 0", 1)
+    text = text.replace("strict_run_cap = 16", "strict_run_cap = 0", 1)
+    cfg_path.write_text(text)
+
+    cfg = load_config(cfg_path)
+    assert cfg.evaluation.prompt_limit == 0
+    assert cfg.distillation.training_prompt_limit == 0
+    assert cfg.campaign.strict_run_cap == 0
+    assert cfg.tuning.stage1_prompt_limit == 0
+    assert cfg.tuning.stage2_prompt_limit == 0
+    assert cfg.tuning.strict_run_cap == 0
+
+
+def test_negative_cap_like_fields_are_rejected(tmp_path: Path):
+    cfg_path = tmp_path / "negative.toml"
+    text = Path("config/default.toml").read_text()
+    text = text.replace("prompt_limit = 150", "prompt_limit = -1", 1)
+    cfg_path.write_text(text)
+    with pytest.raises(ValueError):
+        load_config(cfg_path)

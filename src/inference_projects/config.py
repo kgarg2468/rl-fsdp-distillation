@@ -119,8 +119,6 @@ def _token_caps_by_stage(raw: dict[str, int]) -> dict[str, TokenUsage]:
 def _validate_runtime(runtime: RuntimeConfig) -> None:
     if runtime.default_mode not in {"mock", "real"}:
         raise ValueError("runtime.default_mode must be 'mock' or 'real'")
-    if runtime.projection_warning_min_usd >= runtime.projection_warning_max_usd:
-        raise ValueError("runtime.projection_warning_min_usd must be less than projection_warning_max_usd")
     if not runtime.real_required_env:
         raise ValueError("runtime.real_required_env must not be empty")
     if any(not env.strip() for env in runtime.real_required_env):
@@ -146,8 +144,8 @@ def _validate_runtime(runtime: RuntimeConfig) -> None:
 
 
 def _validate_evaluation(evaluation: EvaluationConfig) -> None:
-    if evaluation.prompt_limit <= 0:
-        raise ValueError("evaluation.prompt_limit must be > 0")
+    if evaluation.prompt_limit < 0:
+        raise ValueError("evaluation.prompt_limit must be >= 0")
     if evaluation.max_concurrency <= 0:
         raise ValueError("evaluation.max_concurrency must be > 0")
     if evaluation.batch_size <= 0:
@@ -169,8 +167,8 @@ def _validate_evaluation(evaluation: EvaluationConfig) -> None:
 
 
 def _validate_distillation(distillation: DistillationConfig) -> None:
-    if distillation.training_prompt_limit <= 0:
-        raise ValueError("distillation.training_prompt_limit must be > 0")
+    if distillation.training_prompt_limit < 0:
+        raise ValueError("distillation.training_prompt_limit must be >= 0")
     if distillation.training_prompt_file is not None and not distillation.training_prompt_file.exists():
         raise FileNotFoundError(f"distillation.training_prompt_file does not exist: {distillation.training_prompt_file}")
     if distillation.teacher_prompt_template not in {"raw", "numeric_strict"}:
@@ -216,17 +214,15 @@ def _validate_campaign(campaign: CampaignConfig) -> None:
         raise ValueError("campaign.bootstrap_reps must be > 0")
     if campaign.early_stop_threshold < 0:
         raise ValueError("campaign.early_stop_threshold must be >= 0")
-    if campaign.strict_run_cap <= 0:
-        raise ValueError("campaign.strict_run_cap must be > 0")
+    if campaign.strict_run_cap < 0:
+        raise ValueError("campaign.strict_run_cap must be >= 0")
 
 
 def _validate_tuning(tuning: TuningConfig) -> None:
-    if tuning.stage1_prompt_limit <= 0:
-        raise ValueError("tuning.stage1_prompt_limit must be > 0")
-    if tuning.stage2_prompt_limit <= 0:
-        raise ValueError("tuning.stage2_prompt_limit must be > 0")
-    if tuning.stage1_prompt_limit > tuning.stage2_prompt_limit:
-        raise ValueError("tuning.stage1_prompt_limit cannot exceed tuning.stage2_prompt_limit")
+    if tuning.stage1_prompt_limit < 0:
+        raise ValueError("tuning.stage1_prompt_limit must be >= 0")
+    if tuning.stage2_prompt_limit < 0:
+        raise ValueError("tuning.stage2_prompt_limit must be >= 0")
     if tuning.sweep_runs <= 0:
         raise ValueError("tuning.sweep_runs must be > 0")
     if not tuning.teacher_candidates:
@@ -245,8 +241,8 @@ def _validate_tuning(tuning: TuningConfig) -> None:
         raise ValueError("tuning.min_student_numeric_parse must be in [0, 1]")
     if tuning.max_eval_duration_seconds <= 0:
         raise ValueError("tuning.max_eval_duration_seconds must be > 0")
-    if tuning.strict_run_cap <= 0:
-        raise ValueError("tuning.strict_run_cap must be > 0")
+    if tuning.strict_run_cap < 0:
+        raise ValueError("tuning.strict_run_cap must be >= 0")
 
 
 def _resolve_path(config_path: Path, raw_path: str | Path) -> Path:
