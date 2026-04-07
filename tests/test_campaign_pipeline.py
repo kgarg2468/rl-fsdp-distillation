@@ -9,6 +9,17 @@ from inference_projects.pipeline import run_pipeline_command
 from inference_projects.tinker_runtime import REAL_USAGE_KEY
 
 
+def _write_campaign_cap_config(tmp_path: Path, *, strict_run_cap: int = 1) -> Path:
+    cfg_path = tmp_path / f"campaign_cap_{strict_run_cap}.toml"
+    cfg_text = Path("config/default.toml").read_text().replace(
+        "strict_run_cap = 16",
+        f"strict_run_cap = {strict_run_cap}",
+        1,
+    )
+    cfg_path.write_text(cfg_text)
+    return cfg_path
+
+
 def _usage(stage: str, seed: int, cost_usd: float) -> dict[str, object]:
     return {
         "prefill_tokens": 100,
@@ -33,8 +44,6 @@ def _load_prompt_rows(cfg) -> list[dict[str, str]]:
                 "reference": str(row.get("reference", "")),
             }
         )
-        if len(rows) >= cfg.evaluation.prompt_limit:
-            break
     return rows
 
 
@@ -203,6 +212,8 @@ def test_campaign_stops_after_two_runs_when_variance_low(tmp_path: Path, monkeyp
     )
 
     assert summary is not None
+    assert summary["campaign_win"] is True
+    assert "reproducibility" in summary
     assert summary["early_stop"]["triggered"] is True
     assert summary["executed_seeds"] == [17, 29]
     assert len(summary["runs"]) == 2
@@ -297,10 +308,8 @@ def test_campaign_integrity_warn_sets_needs_debug_without_forced_stop(tmp_path: 
     assert all(run["integrity"]["status"] == "warn" for run in summary["runs"])
 
 
-def test_campaign_respects_strict_run_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    cfg_path = tmp_path / "cap.toml"
-    cfg_text = Path("config/default.toml").read_text().replace("strict_run_cap = 16", "strict_run_cap = 1", 1)
-    cfg_path.write_text(cfg_text)
+def test_campaign_enforces_strict_run_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg_path = _write_campaign_cap_config(tmp_path, strict_run_cap=1)
     state_dir = tmp_path / "state"
     monkeypatch.setenv("TINKER_API_KEY", "dummy")
     monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
@@ -309,7 +318,146 @@ def test_campaign_respects_strict_run_cap(tmp_path: Path, monkeypatch: pytest.Mo
     summary = run_pipeline_command("campaign", mode="real", state_dir=state_dir, config_path=cfg_path)
     assert summary is not None
     assert summary["executed_seeds"] == [17]
-    assert summary["campaign_status"] in {"ok", "needs_debug"}
+    guardrails = summary["guardrails"]["campaign_strict_run_cap"]
+    assert guardrails["configured"] == 1
+    assert guardrails["enforced"] is True
+    assert guardrails["effective_max_runs"] == 1
+    assert guardrails["cap_hit"] is True
+
+
+def test_campaign_ignores_evaluation_prompt_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg_path = tmp_path / "prompt_limit.toml"
+    cfg_text = Path("config/default.toml").read_text().replace("prompt_limit = 150", "prompt_limit = 10", 1)
+    cfg_path.write_text(cfg_text)
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("TINKER_API_KEY", "dummy")
+    monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
+    _patch_fake_real_adapters(monkeypatch, student_score_for_seed=lambda seed: 0.35)
+
+    summary = run_pipeline_command("campaign", mode="real", state_dir=state_dir, config_path=cfg_path)
+    assert summary is not None
+    assert summary["frozen_prompts"]["prompt_limit"] == 150
+    assert all(run["metrics"]["rows"] == 150 for run in summary["runs"])
+
+
+def test_campaign_marks_needs_debug_when_teacher_margin_misses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("TINKER_API_KEY", "dummy")
+    monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
+
+    class LowTeacherEval(FakeRealEval):
+        def run(self, *, cfg, teacher_payload, student_payload, actual_cost_usd):
+            payload = super().run(
+                cfg=cfg,
+                teacher_payload=teacher_payload,
+                student_payload=student_payload,
+                actual_cost_usd=actual_cost_usd,
+            )
+            quality = payload["quality"]["benchmark"]
+            quality["teacher"] = 0.33
+            for row in payload["_eval_rows"]:
+                row["teacher_overlap"] = 0.33
+            return payload
+
+    monkeypatch.setattr(
+        "inference_projects.pipeline.select_stage_adapters",
+        lambda mode: StageAdapters(
+            rl=FakeRealRL(),
+            teacher_ft=FakeRealTeacherFT(),
+            distill=FakeRealDistill(),
+            eval=LowTeacherEval(student_score_for_seed=lambda seed: 0.35),
+        ),
+    )
+
+    summary = run_pipeline_command("campaign", mode="real", state_dir=state_dir)
+    assert summary is not None
+    assert summary["campaign_win"] is False
+    assert summary["campaign_status"] == "needs_debug"
+    assert summary["acceptance_checks"]["teacher_vs_baseline_margin_min_0_05_all_runs"] is False
+
+
+def test_campaign_mock_reproducibility_mismatch_blocks_rerun(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    cfg_path = _write_campaign_cap_config(tmp_path, strict_run_cap=1)
+    state_dir = tmp_path / "state"
+    _patch_fake_real_adapters(monkeypatch, student_score_for_seed=lambda seed: 0.35)
+
+    summary = run_pipeline_command("campaign", mode="mock", state_dir=state_dir, config_path=cfg_path)
+    assert summary is not None
+    summary_path = Path(summary["artifacts"]["campaign_summary"])
+    payload = json.loads(summary_path.read_text())
+    payload["reproducibility"]["artifact_fingerprint"] = "tampered-artifact-fingerprint"
+    summary_path.write_text(json.dumps(payload, indent=2) + "\n")
+
+    with pytest.raises(RuntimeError, match="reproducibility"):
+        run_pipeline_command("campaign", mode="mock", state_dir=state_dir, config_path=cfg_path)
+
+
+def test_campaign_real_reproducibility_invariant_mismatch_blocks_rerun(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cfg_path = _write_campaign_cap_config(tmp_path, strict_run_cap=1)
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("TINKER_API_KEY", "dummy")
+    monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
+    _patch_fake_real_adapters(monkeypatch, student_score_for_seed=lambda seed: 0.35)
+
+    summary = run_pipeline_command("campaign", mode="real", state_dir=state_dir, config_path=cfg_path)
+    assert summary is not None
+    summary_path = Path(summary["artifacts"]["campaign_summary"])
+    payload = json.loads(summary_path.read_text())
+    payload["reproducibility"]["invariant_fingerprint"] = "tampered-invariant-fingerprint"
+    summary_path.write_text(json.dumps(payload, indent=2) + "\n")
+
+    with pytest.raises(RuntimeError, match="reproducibility"):
+        run_pipeline_command("campaign", mode="real", state_dir=state_dir, config_path=cfg_path)
+
+
+def test_campaign_marks_needs_debug_when_eval_runtime_threshold_misses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cfg_path = _write_campaign_cap_config(tmp_path, strict_run_cap=1)
+    state_dir = tmp_path / "state"
+    monkeypatch.setenv("TINKER_API_KEY", "dummy")
+    monkeypatch.setenv("TINKER_BASE_URL", "https://example.test")
+
+    import inference_projects.pipeline as pipeline_mod
+
+    base_monotonic = pipeline_mod.time.monotonic
+    monotonic_offset = {"seconds": 0.0}
+
+    def shifted_monotonic() -> float:
+        return base_monotonic() + float(monotonic_offset["seconds"])
+
+    class RuntimeMissEval(FakeRealEval):
+        def run(self, *, cfg, teacher_payload, student_payload, actual_cost_usd):
+            payload = super().run(
+                cfg=cfg,
+                teacher_payload=teacher_payload,
+                student_payload=student_payload,
+                actual_cost_usd=actual_cost_usd,
+            )
+            # Simulate eval taking >720s without adding real wall-clock latency to the test.
+            monotonic_offset["seconds"] = 721.0
+            return payload
+
+    monkeypatch.setattr("inference_projects.pipeline.time.monotonic", shifted_monotonic)
+    monkeypatch.setattr(
+        "inference_projects.pipeline.select_stage_adapters",
+        lambda mode: StageAdapters(
+            rl=FakeRealRL(),
+            teacher_ft=FakeRealTeacherFT(),
+            distill=FakeRealDistill(),
+            eval=RuntimeMissEval(student_score_for_seed=lambda seed: 0.35),
+        ),
+    )
+
+    summary = run_pipeline_command("campaign", mode="real", state_dir=state_dir, config_path=cfg_path)
+    assert summary is not None
+    assert summary["campaign_win"] is False
+    assert summary["campaign_status"] == "needs_debug"
+    assert summary["acceptance_checks"]["eval_duration_under_720_seconds_all_runs"] is False
+    assert summary["acceptance_checks"]["teacher_vs_baseline_margin_min_0_05_all_runs"] is True
+    assert summary["acceptance_checks"]["integrity_passed_all_runs"] is True
 
 
 def test_campaign_emits_summary_on_failure_and_resumes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
