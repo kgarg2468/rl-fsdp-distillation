@@ -125,8 +125,13 @@ Real mode setup:
 set -a && source .env && set +a
 STATE_DIR="$(python3 scripts/allocate_run_dir.py --root runs)"
 python3 -m inference_projects.cli preflight --mode real --config config/default.toml --state-dir "$STATE_DIR"
-python3 -m inference_projects.cli campaign --mode real --config config/default.toml --state-dir "$STATE_DIR"
+python3 -m inference_projects.cli campaign --mode real --config config/real_canary_phase1.toml --state-dir "$STATE_DIR" \
+  2>&1 | tee "$STATE_DIR/phase1_campaign.log"
 ```
+
+Phase 1 recommendation:
+- Prefer `campaign` with `config/real_canary_phase1.toml` for canary retries, watchdog telemetry, and structured failure handling.
+- Capture both stdout and stderr to per-run logs with `2>&1 | tee ...` for postmortem analysis.
 
 ## Artifacts & Run Directory Model
 

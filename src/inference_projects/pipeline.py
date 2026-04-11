@@ -16,6 +16,7 @@ from inference_projects import tuning as tuning_utils
 from inference_projects.adapters import (
     DistillStageAdapter,
     EvalStageAdapter,
+    StageAdapters,
     TeacherFTStageAdapter,
     RLStageAdapter,
     select_stage_adapters,
@@ -186,11 +187,14 @@ def run_pipeline_command(
     elif command == "report":
         run_report(cfg, paths, mode=resolved_mode, preflight=preflight_result)
     elif command == "all":
-        run_rl(cfg, paths, adapter=adapters.rl, mode=resolved_mode, preflight=preflight_result)
-        run_teacher_ft(cfg, paths, adapter=adapters.teacher_ft, mode=resolved_mode, preflight=preflight_result)
-        run_distill(cfg, paths, adapter=adapters.distill, mode=resolved_mode, preflight=preflight_result)
-        run_eval(cfg, paths, adapter=adapters.eval, mode=resolved_mode, preflight=preflight_result)
-        run_report(cfg, paths, mode=resolved_mode, preflight=preflight_result)
+        _run_all_with_reliability(
+            cfg=cfg,
+            mode=resolved_mode,
+            paths=paths,
+            options=options,
+            preflight_result=preflight_result,
+            adapters=adapters,
+        )
     elif command == "smoke":
         run_rl(cfg, paths, adapter=adapters.rl, mode=resolved_mode, preflight=preflight_result)
     return None
@@ -524,6 +528,232 @@ def _run_with_watchdog(
         thread.join(timeout=poll_interval)
     if "exception" in result:
         raise result["exception"]  # type: ignore[misc]
+
+
+def _normalize_integrity_status(raw: object) -> str:
+    status = str(raw or "pass")
+    if status == "ok":
+        return "pass"
+    if status == "integrity_failed":
+        return "fail"
+    return status
+
+
+def _read_eval_integrity(path: Path) -> dict[str, object]:
+    payload = _read_json(path)
+    integrity = payload.get("integrity", {})
+    if not isinstance(integrity, dict):
+        integrity = {}
+    status = _normalize_integrity_status(integrity.get("status", "pass"))
+    passed = bool(integrity.get("passed", status == "pass")) and status == "pass"
+    return {
+        "status": status,
+        "passed": passed,
+        "reason": str(integrity.get("reason", "")),
+        "checks": dict(integrity.get("checks", {})) if isinstance(integrity.get("checks"), dict) else {},
+    }
+
+
+def _persist_stage_failure(
+    *,
+    paths: PipelinePaths,
+    command: str,
+    run_id: str,
+    stage: str,
+    attempt: int,
+    elapsed_seconds: float,
+    exc: Exception,
+    failure_class: str,
+) -> None:
+    payload = {
+        "ts": audit.utc_now_iso(),
+        "command": command,
+        "run_id": run_id,
+        "stage": stage,
+        "attempt": attempt,
+        "elapsed_seconds": round(elapsed_seconds, 4),
+        "failure_class": failure_class,
+        "exception_type": type(exc).__name__,
+        "message": str(exc),
+    }
+    paths.audit_dir.mkdir(parents=True, exist_ok=True)
+    failures_path = paths.audit_dir / f"{command}_failures.jsonl"
+    with failures_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+    latest_path = paths.audit_dir / f"{command}_failure_latest.json"
+    latest_path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def _run_all_with_reliability(
+    *,
+    cfg: ProjectConfig,
+    mode: str,
+    paths: PipelinePaths,
+    options: ExecutionOptions,
+    preflight_result: PreflightResult,
+    adapters: StageAdapters,
+) -> None:
+    command = "all"
+    run_id = "all"
+    stages = [*REQUIRED_STAGES, "report"]
+    run_state_path = paths.audit_dir / "all_run_state.json"
+    run_state = _read_run_state(run_state_path)
+    stage_durations: dict[str, float] = {}
+    completed_stages: list[str] = []
+    last_completed_stage = ""
+    attempts = max(1, int(cfg.runtime.max_consecutive_failures))
+    non_retryable = {
+        "integrity_failed",
+        "budget_cap_exceeded",
+        "run_cap_reached",
+        "reproducibility_failed",
+        "invariant_failed",
+    }
+
+    _emit_log(
+        "command_start",
+        command=command,
+        mode=mode,
+        state_dir=str(paths.root),
+        resume=options.resume,
+        heartbeat_seconds=options.heartbeat_seconds,
+        progress_timeout_seconds=options.progress_timeout_seconds,
+    )
+
+    def _stage_call(stage: str) -> None:
+        if stage == "rl":
+            run_rl(cfg, paths, adapter=adapters.rl, mode=mode, preflight=preflight_result)
+        elif stage == "teacher_ft":
+            run_teacher_ft(cfg, paths, adapter=adapters.teacher_ft, mode=mode, preflight=preflight_result)
+        elif stage == "distill":
+            run_distill(cfg, paths, adapter=adapters.distill, mode=mode, preflight=preflight_result)
+        elif stage == "eval":
+            run_eval(cfg, paths, adapter=adapters.eval, mode=mode, preflight=preflight_result)
+        elif stage == "report":
+            run_report(cfg, paths, mode=mode, preflight=preflight_result)
+
+    try:
+        for stage in stages:
+            if options.resume and _is_stage_completed(run_state, run_id=run_id, stage=stage):
+                _verify_resumed_stage(stage=stage, paths=paths)
+                completed_stages.append(stage)
+                _emit_log("stage_resume_skip", command=command, run=run_id, stage=stage)
+                continue
+
+            for attempt in range(1, attempts + 1):
+                stage_started = time.monotonic()
+                ledger_before = load_ledger(paths.ledger)
+                records_before = len(ledger_before.records)
+                _emit_log(
+                    "stage_start",
+                    command=command,
+                    run=run_id,
+                    stage=stage,
+                    attempt=attempt,
+                    max_attempts=attempts,
+                )
+                try:
+                    _run_with_watchdog(
+                        fn=lambda stage=stage: _stage_call(stage),
+                        context=StageExecutionContext(command=command, run_id=run_id, stage=stage),
+                        options=options,
+                    )
+                    stage_durations[stage] = round(time.monotonic() - stage_started, 4)
+                    ledger_after = _verify_campaign_stage(
+                        stage=stage,
+                        paths=paths,
+                        ledger_records_before=records_before,
+                    )
+
+                    if stage == "eval" and mode == "real":
+                        integrity = _read_eval_integrity(paths.eval_metrics)
+                        if not bool(integrity["passed"]):
+                            raise GuardrailViolationError(
+                                "Real-mode all run failed integrity gate: "
+                                f"{integrity['reason'] or 'integrity status is not pass'}",
+                                failure_class="integrity_failed",
+                            )
+
+                    completed_stages.append(stage)
+                    last_completed_stage = stage
+                    _mark_completed_stage(run_state, run_id=run_id, stage=stage)
+                    run_state["status"] = "running"
+                    _write_run_state(run_state_path, run_state)
+
+                    spend_delta = 0.0
+                    if stage in REQUIRED_STAGES:
+                        delta = round(ledger_after.total_spend_usd - ledger_before.total_spend_usd, 4)
+                        if delta < 0:
+                            raise RuntimeError(f"All stage '{stage}' produced negative spend delta: {delta}")
+                        spend_delta = delta
+                    _emit_log(
+                        "stage_done",
+                        command=command,
+                        run=run_id,
+                        stage=stage,
+                        duration_seconds=stage_durations[stage],
+                        spend_delta_usd=round(spend_delta, 4),
+                    )
+                    break
+                except Exception as exc:
+                    elapsed = time.monotonic() - stage_started
+                    failure_class = _classify_exception(exc)
+                    _persist_stage_failure(
+                        paths=paths,
+                        command=command,
+                        run_id=run_id,
+                        stage=stage,
+                        attempt=attempt,
+                        elapsed_seconds=elapsed,
+                        exc=exc,
+                        failure_class=failure_class,
+                    )
+                    if attempt >= attempts or failure_class in non_retryable:
+                        raise StageExecutionError(
+                            f"All stage failed after retries: run={run_id} stage={stage} error={exc}",
+                            failure_class=failure_class,
+                        ) from exc
+                    _emit_log(
+                        "stage_retry",
+                        command=command,
+                        run=run_id,
+                        stage=stage,
+                        attempt=attempt,
+                        error=str(exc),
+                        failure_class=failure_class,
+                    )
+                    sleep_seconds = min(
+                        cfg.runtime.retry_delay_max_seconds,
+                        cfg.runtime.retry_delay_base_seconds * (2 ** (attempt - 1)),
+                    )
+                    time.sleep(sleep_seconds)
+    except Exception as exc:
+        failure_class = _classify_exception(exc) if not isinstance(exc, StageExecutionError) else exc.failure_class
+        run_state["status"] = "failed"
+        run_state["failure_class"] = failure_class
+        run_state["stop_reason"] = str(exc)
+        run_state["last_completed_stage"] = last_completed_stage
+        _write_run_state(run_state_path, run_state)
+        _emit_log(
+            "command_failure",
+            command=command,
+            failure_class=failure_class,
+            stop_reason=str(exc),
+            last_completed_stage=last_completed_stage,
+        )
+        raise RuntimeError(str(exc)) from exc
+
+    run_state["status"] = "completed"
+    run_state["last_completed_stage"] = last_completed_stage
+    run_state["stage_durations_seconds"] = stage_durations
+    _write_run_state(run_state_path, run_state)
+    _emit_log(
+        "command_summary",
+        command=command,
+        status="completed",
+        stages_completed=completed_stages,
+        run_state_path=str(run_state_path),
+    )
 
 
 def _campaign_required_artifacts(paths: PipelinePaths, stage: str) -> list[Path]:

@@ -446,8 +446,20 @@ def _exact_numeric_match(output: str, reference: str) -> float:
     return 1.0 if out_num == ref_num else 0.0
 
 
-def _numeric_parse_rate(output: str) -> float:
-    return 1.0 if _extract_first_int(output) is not None else 0.0
+def _numeric_parse_rate(output: str, reference: str | None = None) -> float:
+    out_num = _extract_first_int(output)
+    if out_num is None:
+        return 0.0
+    if reference is None:
+        return 1.0
+    ref_num = _extract_first_int(reference)
+    if ref_num is None:
+        return 1.0
+    return 1.0 if out_num == ref_num else 0.0
+
+
+def _resolve_prompt_limit(limit: int) -> int | None:
+    return None if limit <= 0 else int(limit)
 
 
 def _model_health(outputs: list[str]) -> dict[str, float]:
@@ -728,7 +740,10 @@ def _save_training_checkpoints(
 def run_real_rl(*, cfg: ProjectConfig) -> dict[str, object]:
     service = build_service_client()
     retry_config = _runtime_retry_config(cfg)
-    prompts = load_canary_prompts(fixture_path=cfg.evaluation.prompt_file)
+    prompts = load_canary_prompts(
+        fixture_path=cfg.evaluation.prompt_file,
+        limit=_resolve_prompt_limit(cfg.evaluation.prompt_limit),
+    )
     training_examples = [(row.prompt, row.reference or row.prompt) for row in prompts]
     train_client = service.create_lora_training_client(
         base_model=cfg.teacher_model,
@@ -827,7 +842,10 @@ def run_real_teacher_ft(*, cfg: ProjectConfig, teacher_payload: dict[str, object
 
     service = build_service_client()
     retry_config = _runtime_retry_config(cfg)
-    prompts = load_canary_prompts(fixture_path=cfg.evaluation.prompt_file)
+    prompts = load_canary_prompts(
+        fixture_path=cfg.evaluation.prompt_file,
+        limit=_resolve_prompt_limit(cfg.evaluation.prompt_limit),
+    )
     training_examples = [(row.prompt, row.reference or row.prompt) for row in prompts]
     train_client = service.create_training_client_from_state_with_optimizer(
         prior_checkpoint,
@@ -934,7 +952,10 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
     service = build_service_client()
     retry_config = _runtime_retry_config(cfg)
     training_prompt_file = cfg.distillation.training_prompt_file or cfg.evaluation.prompt_file
-    prompts = load_canary_prompts(fixture_path=training_prompt_file)
+    prompts = load_canary_prompts(
+        fixture_path=training_prompt_file,
+        limit=_resolve_prompt_limit(cfg.distillation.training_prompt_limit),
+    )
     prompt_texts = [row.prompt for row in prompts]
     teacher_prompt_texts = [
         _apply_prompt_template(row.prompt, cfg.distillation.teacher_prompt_template) for row in prompts
@@ -951,6 +972,8 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
         seed=cfg.seed,
         temperature=cfg.evaluation.eval_temperature,
         stop_tokens=cfg.evaluation.eval_stop_tokens,
+        max_concurrency=cfg.evaluation.max_concurrency,
+        batch_size=cfg.evaluation.batch_size,
         retry_config=retry_config,
         max_consecutive_failures=cfg.runtime.max_consecutive_failures,
     )
@@ -965,6 +988,8 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
         seed=cfg.seed,
         temperature=cfg.evaluation.eval_temperature,
         stop_tokens=cfg.evaluation.eval_stop_tokens,
+        max_concurrency=cfg.evaluation.max_concurrency,
+        batch_size=cfg.evaluation.batch_size,
         retry_config=retry_config,
         max_consecutive_failures=cfg.runtime.max_consecutive_failures,
     )
@@ -972,7 +997,7 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
     distill_rows: list[dict[str, object]] = []
     for row, teacher_output, baseline_output in zip(prompts, teacher_samples.outputs, baseline_samples.outputs):
         teacher_refusal = _is_refusal_like(teacher_output)
-        teacher_parse = _numeric_parse_rate(teacher_output) == 1.0
+        teacher_parse = _numeric_parse_rate(teacher_output, row.reference) == 1.0
         teacher_exact = _exact_numeric_match(teacher_output, row.reference) == 1.0
         baseline_exact = _exact_numeric_match(baseline_output, row.reference) == 1.0
         teacher_overlap = _score_overlap(teacher_output, row.reference)
@@ -999,17 +1024,37 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
         )
 
     def _eligible(row: dict[str, object]) -> bool:
+        teacher_margin_non_negative = float(row["teacher_minus_baseline_overlap"]) >= 0.0
         if cfg.distillation.filter_profile == "strict":
             return (
                 bool(row["teacher_numeric_parse"])
                 and not bool(row["teacher_refusal_like"])
                 and bool(row["teacher_exact_match"])
+                and teacher_margin_non_negative
             )
-        return bool(row["teacher_numeric_parse"]) and not bool(row["teacher_refusal_like"])
+        return (
+            bool(row["teacher_numeric_parse"])
+            and not bool(row["teacher_refusal_like"])
+            and teacher_margin_non_negative
+        )
 
     eligible = [row for row in distill_rows if _eligible(row)]
     if not eligible:
-        eligible = list(distill_rows)
+        raise RuntimeError(
+            "Distill stage found no eligible rows after teacher quality filtering "
+            f"(profile={cfg.distillation.filter_profile}, rows={len(distill_rows)})."
+        )
+
+    teacher_precheck_score = round(
+        _mean([_numeric_parse_rate(str(row["teacher_output"]), str(row["reference"])) for row in distill_rows]),
+        4,
+    )
+    if teacher_precheck_score < cfg.evaluation.teacher_integrity_min_score:
+        raise RuntimeError(
+            "Pre-distill teacher sanity gate failed: "
+            f"numeric correctness {teacher_precheck_score:.4f} below "
+            f"min {cfg.evaluation.teacher_integrity_min_score:.4f}."
+        )
 
     def _selection_key(row: dict[str, object]) -> tuple[float, int, int, int, str]:
         return (
@@ -1042,7 +1087,7 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
             if len(selected_rows) >= target_size:
                 break
     if not selected_rows:
-        selected_rows = list(distill_rows)
+        raise RuntimeError("Distill stage selected zero rows for training after eligibility filtering.")
     selected_row_ids = {str(row["row_id"]) for row in selected_rows}
     for row in distill_rows:
         row["selected_for_distill"] = str(row["row_id"]) in selected_row_ids
@@ -1056,10 +1101,12 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
         and not bool(row["teacher_refusal_like"])
         and float(row["teacher_minus_baseline_overlap"]) >= 0.0
     ]
+    teacher_target_pool_fallback_used = False
     if not teacher_target_pool:
         teacher_target_pool = [
             row for row in selected_rows if bool(str(row.get("teacher_output", "")).strip())
         ]
+        teacher_target_pool_fallback_used = True
     teacher_target_pool = sorted(teacher_target_pool, key=_selection_key, reverse=True)
     target_teacher_count = int(round(len(selected_rows) * cfg.distillation.kd_alpha))
     target_teacher_count = min(target_teacher_count, len(teacher_target_pool))
@@ -1097,7 +1144,8 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
             "context_length": str(cfg.distillation.context_length),
             "grad_clip": str(cfg.distillation.grad_clip),
             "weight_decay": str(cfg.distillation.weight_decay),
-            "training_prompt_limit": str(len(prompts)),
+            "training_prompt_limit": str(cfg.distillation.training_prompt_limit),
+            "training_prompt_rows_loaded": str(len(prompts)),
         },
     )
     train_info = student_train_client.get_info()
@@ -1137,6 +1185,8 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
         seed=cfg.seed,
         temperature=cfg.evaluation.eval_temperature,
         stop_tokens=cfg.evaluation.eval_stop_tokens,
+        max_concurrency=cfg.evaluation.max_concurrency,
+        batch_size=cfg.evaluation.batch_size,
         retry_config=retry_config,
         max_consecutive_failures=cfg.runtime.max_consecutive_failures,
     )
@@ -1163,7 +1213,8 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
             "distill_stability_score": distill_stability_score,
             "distill_nan_events": distill_nan_events,
             "distillation_config": {
-                "training_prompt_limit": len(prompts),
+                "training_prompt_limit": cfg.distillation.training_prompt_limit,
+                "training_prompt_rows_loaded": len(prompts),
                 "training_prompt_file": str(training_prompt_file),
                 "teacher_prompt_template": cfg.distillation.teacher_prompt_template,
                 "filter_profile": cfg.distillation.filter_profile,
@@ -1178,6 +1229,8 @@ def run_real_distill(*, cfg: ProjectConfig, teacher_payload: dict[str, object]) 
                 "context_length": cfg.distillation.context_length,
                 "grad_clip": cfg.distillation.grad_clip,
                 "weight_decay": cfg.distillation.weight_decay,
+                "teacher_sanity_numeric_correctness": teacher_precheck_score,
+                "teacher_target_pool_fallback_used": teacher_target_pool_fallback_used,
             },
             "training": {
                 "steps": int(training["steps"]),
@@ -1258,7 +1311,10 @@ def run_real_eval(
 ) -> dict[str, object]:
     service = build_service_client()
     retry_config = _runtime_retry_config(cfg)
-    prompts = load_canary_prompts(fixture_path=cfg.evaluation.prompt_file)
+    prompts = load_canary_prompts(
+        fixture_path=cfg.evaluation.prompt_file,
+        limit=_resolve_prompt_limit(cfg.evaluation.prompt_limit),
+    )
     prompt_texts = [row.prompt for row in prompts]
     teacher_prompt_texts = [
         _apply_prompt_template(row.prompt, cfg.distillation.teacher_prompt_template) for row in prompts
@@ -1329,9 +1385,9 @@ def run_real_eval(
     baseline_exact_matches = [_exact_numeric_match(out, ref) for out, ref in zip(baseline.outputs, references)]
     teacher_exact_matches = [_exact_numeric_match(out, ref) for out, ref in zip(teacher.outputs, references)]
     student_exact_matches = [_exact_numeric_match(out, ref) for out, ref in zip(student.outputs, references)]
-    baseline_parse_rates = [_numeric_parse_rate(out) for out in baseline.outputs]
-    teacher_parse_rates = [_numeric_parse_rate(out) for out in teacher.outputs]
-    student_parse_rates = [_numeric_parse_rate(out) for out in student.outputs]
+    baseline_parse_rates = [_numeric_parse_rate(out, ref) for out, ref in zip(baseline.outputs, references)]
+    teacher_parse_rates = [_numeric_parse_rate(out, ref) for out, ref in zip(teacher.outputs, references)]
+    student_parse_rates = [_numeric_parse_rate(out, ref) for out, ref in zip(student.outputs, references)]
 
     baseline_quality = round(_mean(baseline_scores), 4)
     teacher_quality = round(_mean(teacher_scores), 4)

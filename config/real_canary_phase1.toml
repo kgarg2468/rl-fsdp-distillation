@@ -1,5 +1,5 @@
 [project]
-name = "RL + Teacher FT + Distillation (Real Canary)"
+name = "RL + Teacher FT + Distillation (Phase1 Canary Campaign)"
 seed = 42
 
 [token_rates_per_million]
@@ -71,12 +71,12 @@ grad_clip = 1.0
 weight_decay = 0.0
 
 [campaign]
-seeds = [17, 29, 43]
-min_runs = 2
-max_runs = 3
+seeds = [42]
+min_runs = 1
+max_runs = 1
 bootstrap_reps = 5000
 early_stop_threshold = 0.03
-strict_run_cap = 16
+strict_run_cap = 1
 
 [tuning]
 stage1_prompt_limit = 30

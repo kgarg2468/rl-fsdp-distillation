@@ -27,17 +27,26 @@ def test_real_canary_config_loads_successfully():
     assert cfg.evaluation.batch_size > 0
     assert cfg.evaluation.max_tokens_eval > 0
     assert cfg.evaluation.eval_temperature == 0.0
-    assert cfg.evaluation.eval_max_tokens_candidates == (48, 96)
+    assert cfg.evaluation.eval_max_tokens_candidates == (16, 32)
     assert cfg.evaluation.teacher_integrity_numeric_parse_threshold == 0.8
     assert cfg.distillation.training_prompt_limit == 150
     assert cfg.distillation.training_prompt_file is None
-    assert cfg.distillation.filter_profile == "moderate"
+    assert cfg.distillation.filter_profile == "strict"
     assert cfg.distillation.lora_rank == 8
     assert cfg.campaign.seeds == (17, 29, 43)
     assert cfg.campaign.strict_run_cap == 16
     assert cfg.tuning.sweep_runs == 16
     assert cfg.tuning.strict_run_cap == 16
     assert cfg.tuning.teacher_candidates == (cfg.teacher_model,)
+
+
+def test_phase1_canary_config_loads_successfully():
+    cfg = load_config("config/real_canary_phase1.toml")
+    assert cfg.campaign.seeds == (42,)
+    assert cfg.campaign.min_runs == 1
+    assert cfg.campaign.max_runs == 1
+    assert cfg.campaign.strict_run_cap == 1
+    assert cfg.distillation.filter_profile == "strict"
 
 
 def test_campaign_max_runs_cannot_exceed_seed_count(tmp_path: Path):

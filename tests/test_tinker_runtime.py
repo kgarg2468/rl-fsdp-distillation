@@ -15,6 +15,7 @@ from inference_projects.tinker_runtime import (
     continue_from_checkpoint,
     create_lora_checkpoint,
     load_canary_prompts,
+    run_real_eval,
     run_real_teacher_ft,
     run_real_distill,
     run_real_rl,
@@ -59,6 +60,8 @@ def test_exact_numeric_match_and_parse_rate():
     assert _exact_numeric_match("answer: 13", "12") == 0.0
     assert _numeric_parse_rate("value 42") == 1.0
     assert _numeric_parse_rate("no number present") == 0.0
+    assert _numeric_parse_rate("answer: 12", "12") == 1.0
+    assert _numeric_parse_rate("answer: 13", "12") == 0.0
 
 
 def test_refusal_detection_and_model_health():
@@ -286,6 +289,7 @@ def test_run_training_loop_uses_micro_batch_fallback_on_shape_errors():
 def test_run_real_rl_records_training_metadata(monkeypatch):
     cfg = load_config()
     cfg = replace(cfg, evaluation=replace(cfg.evaluation, prompt_limit=2))
+    seen_limits: list[int | None] = []
 
     class FakeTrainClient:
         def get_info(self):
@@ -297,13 +301,14 @@ def test_run_real_rl_records_training_metadata(monkeypatch):
             return FakeTrainClient()
 
     monkeypatch.setattr("inference_projects.tinker_runtime.build_service_client", lambda: FakeService())
-    monkeypatch.setattr(
-        "inference_projects.tinker_runtime.load_canary_prompts",
-        lambda **kwargs: [
+    def fake_load_canary_prompts(**kwargs):
+        seen_limits.append(kwargs.get("limit"))
+        return [
             type("PromptRow", (), {"row_id": "r1", "prompt": "1+1", "reference": "2"})(),
             type("PromptRow", (), {"row_id": "r2", "prompt": "2+2", "reference": "4"})(),
-        ],
-    )
+        ]
+
+    monkeypatch.setattr("inference_projects.tinker_runtime.load_canary_prompts", fake_load_canary_prompts)
     monkeypatch.setattr(
         "inference_projects.tinker_runtime._run_training_loop",
         lambda **kwargs: {
@@ -337,11 +342,13 @@ def test_run_real_rl_records_training_metadata(monkeypatch):
     assert result["payload"]["training"]["steps"] == 3
     assert result["payload"]["rl_nan_events"] == 0
     assert result["usage"]["train_tokens"] == 12
+    assert seen_limits == [2]
 
 
 def test_run_real_teacher_ft_records_training_metadata(monkeypatch):
     cfg = load_config()
     cfg = replace(cfg, evaluation=replace(cfg.evaluation, prompt_limit=2))
+    seen_limits: list[int | None] = []
 
     class FakeTrainClient:
         def get_info(self):
@@ -353,13 +360,14 @@ def test_run_real_teacher_ft_records_training_metadata(monkeypatch):
             return FakeTrainClient()
 
     monkeypatch.setattr("inference_projects.tinker_runtime.build_service_client", lambda: FakeService())
-    monkeypatch.setattr(
-        "inference_projects.tinker_runtime.load_canary_prompts",
-        lambda **kwargs: [
+    def fake_load_canary_prompts(**kwargs):
+        seen_limits.append(kwargs.get("limit"))
+        return [
             type("PromptRow", (), {"row_id": "r1", "prompt": "1+1", "reference": "2"})(),
             type("PromptRow", (), {"row_id": "r2", "prompt": "2+2", "reference": "4"})(),
-        ],
-    )
+        ]
+
+    monkeypatch.setattr("inference_projects.tinker_runtime.load_canary_prompts", fake_load_canary_prompts)
     monkeypatch.setattr(
         "inference_projects.tinker_runtime._run_training_loop",
         lambda **kwargs: {
@@ -401,11 +409,14 @@ def test_run_real_teacher_ft_records_training_metadata(monkeypatch):
     assert result["payload"]["training"]["steps"] == 4
     assert result["payload"]["teacher_ft_nan_events"] == 1
     assert result["usage"]["train_tokens"] == 16
+    assert seen_limits == [2]
 
 
 def test_run_real_distill_uses_scaled_training_data(monkeypatch):
     cfg = load_config()
     cfg = replace(cfg, distillation=replace(cfg.distillation, training_prompt_limit=3))
+    seen_limits: list[int | None] = []
+    sampled_kwargs: list[dict[str, object]] = []
 
     class FakeTrainClient:
         def get_info(self):
@@ -422,7 +433,11 @@ def test_run_real_distill_uses_scaled_training_data(monkeypatch):
         type("PromptRow", (), {"row_id": "r3", "prompt": "3+3", "reference": "6"})(),
     ]
     monkeypatch.setattr("inference_projects.tinker_runtime.build_service_client", lambda: FakeService())
-    monkeypatch.setattr("inference_projects.tinker_runtime.load_canary_prompts", lambda **kwargs: rows)
+    def fake_load_canary_prompts(**kwargs):
+        seen_limits.append(kwargs.get("limit"))
+        return rows
+
+    monkeypatch.setattr("inference_projects.tinker_runtime.load_canary_prompts", fake_load_canary_prompts)
     monkeypatch.setattr(
         "inference_projects.tinker_runtime._run_training_loop",
         lambda **kwargs: {
@@ -443,6 +458,7 @@ def test_run_real_distill_uses_scaled_training_data(monkeypatch):
     )
 
     def fake_sample_prompts(**kwargs):
+        sampled_kwargs.append(dict(kwargs))
         label = kwargs["model_label"]
         if label == "teacher":
             outputs = ["2", "4", "6"]
@@ -470,8 +486,12 @@ def test_run_real_distill_uses_scaled_training_data(monkeypatch):
     )
     assert result["payload"]["training"]["steps"] == 5
     assert result["payload"]["distillation_config"]["training_prompt_limit"] == 3
+    assert result["payload"]["distillation_config"]["training_prompt_rows_loaded"] == 3
     assert result["payload"]["distill_dataset"]["total_rows"] == 3
     assert result["usage"]["train_tokens"] == 20
+    assert seen_limits == [3]
+    assert all(call["max_concurrency"] == cfg.evaluation.max_concurrency for call in sampled_kwargs)
+    assert all(call["batch_size"] == cfg.evaluation.batch_size for call in sampled_kwargs)
 
 
 def test_run_real_distill_uses_distillation_training_prompt_file_when_set(monkeypatch):
@@ -499,9 +519,11 @@ def test_run_real_distill_uses_distillation_training_prompt_file_when_set(monkey
         type("PromptRow", (), {"row_id": "r2", "prompt": "2+2", "reference": "4"})(),
     ]
     seen_fixture_paths = []
+    seen_limits: list[int | None] = []
 
     def fake_load_canary_prompts(**kwargs):
         seen_fixture_paths.append(kwargs["fixture_path"])
+        seen_limits.append(kwargs.get("limit"))
         return rows
 
     monkeypatch.setattr("inference_projects.tinker_runtime.build_service_client", lambda: FakeService())
@@ -561,3 +583,44 @@ def test_run_real_distill_uses_distillation_training_prompt_file_when_set(monkey
         },
     )
     assert seen_fixture_paths == [CANARY_FIXTURE_PATH]
+    assert seen_limits == [2]
+
+
+def test_run_real_eval_uses_prompt_limit_and_reference_aware_numeric_parse(monkeypatch):
+    cfg = load_config()
+    cfg = replace(cfg, evaluation=replace(cfg.evaluation, prompt_limit=2))
+    seen_limits: list[int | None] = []
+
+    class FakeService:
+        pass
+
+    rows = [
+        type("PromptRow", (), {"row_id": "r1", "prompt": "1+1", "reference": "2"})(),
+        type("PromptRow", (), {"row_id": "r2", "prompt": "2+2", "reference": "4"})(),
+    ]
+
+    def fake_load_canary_prompts(**kwargs):
+        seen_limits.append(kwargs.get("limit"))
+        return rows
+
+    def fake_sample_prompts(**kwargs):
+        label = kwargs["model_label"]
+        if label == "baseline":
+            return SamplingBatch(outputs=["2", "4"], prefill_tokens=8, sample_tokens=2, session_id="baseline", trace_rows=[])
+        if label == "teacher":
+            return SamplingBatch(outputs=["12", "40"], prefill_tokens=8, sample_tokens=2, session_id="teacher", trace_rows=[])
+        return SamplingBatch(outputs=["2", "4"], prefill_tokens=8, sample_tokens=2, session_id="student", trace_rows=[])
+
+    monkeypatch.setattr("inference_projects.tinker_runtime.build_service_client", lambda: FakeService())
+    monkeypatch.setattr("inference_projects.tinker_runtime.load_canary_prompts", fake_load_canary_prompts)
+    monkeypatch.setattr("inference_projects.tinker_runtime.sample_prompts", fake_sample_prompts)
+
+    result = run_real_eval(
+        cfg=cfg,
+        teacher_payload={"sampler_checkpoint_path": "tinker://sampler/teacher"},
+        student_payload={"sampler_checkpoint_path": "tinker://sampler/student"},
+    )
+    assert seen_limits == [2]
+    sanity = result["payload"]["quality"]["sanity"]["numeric_parse_rate"]
+    assert sanity["teacher"] == 0.0
+    assert sanity["baseline"] == 1.0
